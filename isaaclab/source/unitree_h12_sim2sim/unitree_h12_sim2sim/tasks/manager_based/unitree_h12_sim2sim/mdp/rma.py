@@ -232,19 +232,28 @@ def sample_rma_env_factors(
 
 def print_rma_env_factors(
     env: "ManagerBasedRLEnv",
-    env_ids: torch.Tensor | None = None,
-    *,
-    max_envs: int = 2,
-    prefix: str = "[RMA]",
+    env_ids: torch.Tensor | None,
+    max_envs: int,
+    prefix: str,
 ) -> None:
     """Periodic debug printer for the privileged e_t buffer.
 
     Intended to be used with an IsaacLab EventTerm in `mode="interval"`.
     """
 
+    def _emit(msg: str) -> None:
+        """Emit log message in Isaac Sim (preferred), otherwise stdout."""
+
+        try:
+            import omni.log  # type: ignore
+
+            omni.log.info(msg)
+        except Exception:
+            print(msg, flush=True)
+
     et = getattr(env, "rma_env_factors_buf", None)
     if et is None or not isinstance(et, torch.Tensor):
-        print(f"{prefix} e_t buffer not found yet (env.rma_env_factors_buf is missing).")
+        _emit(f"{prefix} e_t buffer not found yet (env.rma_env_factors_buf is missing).")
         return
 
     if env_ids is None:
@@ -283,7 +292,7 @@ def print_rma_env_factors(
     )
     step_str = f" step={step}" if step is not None else ""
 
-    print(
+    _emit(
         f"{prefix}{step_str} e_t stats over {env_ids.numel()} envs | "
         f"mass(mean/min/max)={m_mass:.3f}/{mi_mass:.3f}/{ma_mass:.3f} kg | "
         f"com_x={m_cx:.3f}/{mi_cx:.3f}/{ma_cx:.3f} m | "
@@ -291,4 +300,4 @@ def print_rma_env_factors(
         f"leg_strength={m_ls:.3f}/{mi_ls:.3f}/{ma_ls:.3f} | "
         f"friction={m_mu:.3f}/{mi_mu:.3f}/{ma_mu:.3f}"
     )
-    print(f"{prefix} sample env_ids={env_ids_show} e_t[:{n_show}]={samples_show}")
+    _emit(f"{prefix} sample env_ids={env_ids_show} e_t[:{n_show}]={samples_show}")
