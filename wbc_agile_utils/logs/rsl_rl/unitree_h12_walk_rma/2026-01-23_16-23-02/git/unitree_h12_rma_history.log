@@ -1,0 +1,14 @@
+--- Current Repository State ---
+Branch: main
+Current commit: eb59cf77997d6560623cd1131cba8703f3754198
+Working directory: /home/niraj/isaac_projects/unitree_h12_rma
+
+--- Current Branch Commit History ---
+eb59cf7 added printing for exts
+efb2601 add rma modules and new cfg env
+743d8ec Initial commit
+
+--- Remote Information ---
+Remote: origin
+  URL: git@github.com:correlllab/unitree_h12_rma.git
+

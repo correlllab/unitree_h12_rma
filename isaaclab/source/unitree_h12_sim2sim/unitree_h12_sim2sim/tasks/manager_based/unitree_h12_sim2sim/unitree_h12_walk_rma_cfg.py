@@ -18,6 +18,7 @@ from __future__ import annotations
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils import configclass
 
@@ -113,15 +114,49 @@ class EventRmaCfg(_BaseEventCfg):
         },
     )
 
+    # Print once at the first reset (early training episodes can be <5s, so interval prints may not fire).
+    rma_debug_print_once = EventTerm(
+        func=mdp.print_rma_env_factors_once,
+        mode="reset",
+        params={
+            "max_envs": 2,
+            "prefix": "[RMA:e_t][once]",
+        },
+    )
+
+    # Verify that sampled values are applied in the simulator (best-effort readbacks), once.
+    rma_verify_apply_once = EventTerm(
+        func=mdp.verify_rma_env_factors_once,
+        mode="reset",
+        params={
+            "max_envs": 2,
+            "prefix": "[RMA:verify]",
+        },
+    )
+
     rma_debug_print = EventTerm(
         func=mdp.print_rma_env_factors,
         mode="interval",
-        interval_range_s=(5.0, 5.0),
+        # Run every sim step; the function itself gates printing to once every 100 steps.
+        interval_range_s=(0.02, 0.02),
         params={
             "max_envs": 2,
             "prefix": "[RMA:e_t]",
         },
     )
+
+
+
+@configclass
+class CurriculumRmaCfg:
+    """Curriculum config for RMA training.
+
+    Enable terrain curriculum so terrain changes are driven by curriculum.
+    Keep command curriculum enabled.
+    """
+
+    terrain_levels = CurrTerm(func=mdp.terrain_levels_vel)
+    lin_vel_cmd_levels = CurrTerm(mdp.lin_vel_cmd_levels)
 
 
 @configclass
@@ -130,3 +165,10 @@ class H12LocomotionFullBodyRmaEnvCfg(H12LocomotionFullBodyEnvCfg):
 
     observations: ObservationsRmaCfg = ObservationsRmaCfg()
     events: EventRmaCfg = EventRmaCfg()
+    curriculum: CurriculumRmaCfg = CurriculumRmaCfg()
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        # Ensure terrain generator curriculum is enabled for RMA training.
+        if self.scene.terrain.terrain_generator is not None:
+            self.scene.terrain.terrain_generator.curriculum = True

@@ -43,18 +43,24 @@ from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 ##############################################################
 
-COBBLESTONE_ROAD_CFG = terrain_gen.TerrainGeneratorCfg(
+ROUGH_TERRAINS_CFG = terrain_gen.TerrainGeneratorCfg(
     size=(8.0, 8.0),
     border_width=20.0,
-    num_rows=9,
-    num_cols=21,
+    num_rows=10,
+    num_cols=20,
     horizontal_scale=0.1,
     vertical_scale=0.005,
     slope_threshold=0.75,
     difficulty_range=(0.0, 1.0),
     use_cache=False,
     sub_terrains={
-        "flat": terrain_gen.MeshPlaneTerrainCfg(proportion=0.5),
+        # Bumps-only terrain (random rough heightfield)
+        "random_rough": terrain_gen.HfRandomUniformTerrainCfg(
+            proportion=1.0,
+            noise_range=(0.02, 0.10),
+            noise_step=0.02,
+            border_width=0.25,
+        ),
     },
 )
 
@@ -72,8 +78,8 @@ class H12LocomotionSceneCfg(InteractiveSceneCfg):
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
         terrain_type="generator",  # "plane", "generator"
-        terrain_generator=COBBLESTONE_ROAD_CFG,  # None, ROUGH_TERRAINS_CFG
-        max_init_terrain_level=COBBLESTONE_ROAD_CFG.num_rows - 1,
+        terrain_generator=ROUGH_TERRAINS_CFG,
+        max_init_terrain_level=0,
         collision_group=-1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",

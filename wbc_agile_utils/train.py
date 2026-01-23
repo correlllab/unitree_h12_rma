@@ -43,6 +43,12 @@ parser.add_argument(
     default=100,
     help="Interval between video recordings (in training iterations).",
 )
+parser.add_argument(
+    "--video_interval_steps",
+    type=int,
+    default=1000,
+    help="Interval between video recordings (in environment steps). Overrides --video_interval_iter if > 0.",
+)
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
@@ -163,7 +169,10 @@ def main(
 
     # wrap for video recording
     if args_cli.video:
-        video_interval_steps = args_cli.video_interval_iter * agent_cfg.num_steps_per_env
+        if args_cli.video_interval_steps and args_cli.video_interval_steps > 0:
+            video_interval_steps = args_cli.video_interval_steps
+        else:
+            video_interval_steps = args_cli.video_interval_iter * agent_cfg.num_steps_per_env
         video_kwargs = {
             "video_folder": os.path.join(log_dir, "videos", "train"),
             "step_trigger": lambda step: step % video_interval_steps == 0,
