@@ -1,0 +1,29 @@
+--- Current Repository State ---
+Branch: main
+Current commit: 6d83ce2d5235495dc975de1d79ccb383b4ef7dba
+Working directory: /home/niraj/isaac_projects/unitree_h12_sim2sim
+
+--- Current Branch Commit History ---
+6d83ce2 main readme edited
+37d6cd9 edited Readme
+e323f13 add checkpoint
+7fe4ad2 Move sim2mujoco_eval.py to mujoco directory
+9204860 Clean up: remove duplicate scripts/source directories, reorganize to 3 root dirs (isaaclab, wbc_agile_utils, mujoco)
+fe0559f Reorganize: move isaaclab, wbc_agile_utils, mujoco to root
+6a118c5 Merge: keep remote template README
+8f68a2d Remove accidental submodule
+59502c5 add mujoco base
+e1baf37 Remove .vscode from tracking
+014a7af Remove config files from tracking
+0b5b162 Merge main into master: keep master README
+63dec12 add stand env in isaaclab
+8dfc4f8 Initial commit
+a4e4ff1 Update README.md
+4e8c04f first commit
+1ad4191 first commit
+908b715 first commit
+
+--- Remote Information ---
+Remote: origin
+  URL: git@github.com:correlllab/unitree_h12_sim2sim.git
+
