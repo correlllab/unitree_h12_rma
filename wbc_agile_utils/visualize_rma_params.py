@@ -46,6 +46,18 @@ parser.add_argument(
     default=0.5,
     help="Probability of moving to a harder vs easier terrain when changing.",
 )
+parser.add_argument(
+    "--terrain_extremes",
+    action="store_true",
+    default=False,
+    help="Force terrain to alternate between min/max levels for clearer visuals.",
+)
+parser.add_argument(
+    "--terrain_extreme_interval",
+    type=int,
+    default=200,
+    help="Steps between forcing terrain to extremes (when enabled).",
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -68,6 +80,13 @@ import unitree_h12_sim2sim  # noqa: F401
 from unitree_h12_sim2sim.rma_modules.env_factor_spec import DEFAULT_ET_SPEC
 from unitree_h12_sim2sim.tasks.manager_based.unitree_h12_sim2sim import mdp
 from unitree_h12_sim2sim.tasks.manager_based.unitree_h12_sim2sim.mdp import rma as rma_mdp
+
+try:
+    from omni.isaac.debug_draw import _debug_draw  # type: ignore
+
+    _DEBUG_DRAW = _debug_draw.acquire_debug_draw_interface()
+except Exception:
+    _DEBUG_DRAW = None
 
 
 def _apply_manual_et(
@@ -111,6 +130,59 @@ def _apply_manual_et(
     rma_mdp._try_set_body_mass_and_com(env, asset_cfg, env_ids, mass_add, com_xy)
     rma_mdp._try_set_leg_effort_limits(env, asset_cfg, env_ids, leg_scale, rma_mdp.LEG_JOINT_NAMES)
     rma_mdp._try_set_ground_friction(env, fric)
+
+
+def _update_origin_marker(env, env_ids: torch.Tensor) -> None:
+    """Draw a visible marker at the current env origin (best-effort)."""
+
+    if _DEBUG_DRAW is None:
+        return
+    try:
+        origins = env.scene.env_origins[env_ids].detach().cpu().numpy()
+        # Use a bright marker slightly above the ground.
+        points = [[float(o[0]), float(o[1]), float(o[2]) + 0.5] for o in origins]
+        colors = [[1.0, 0.2, 0.2, 1.0] for _ in points]
+        sizes = [20.0 for _ in points]
+        _DEBUG_DRAW.clear_points()
+        _DEBUG_DRAW.draw_points(points, colors, sizes)
+    except Exception:
+        pass
+
+
+def _force_terrain_extreme(env, env_ids: torch.Tensor, target: str) -> None:
+    """Force terrain levels toward min or max by repeated update_env_origins calls (best-effort)."""
+
+    terrain = getattr(env.scene, "terrain", None)
+    if terrain is None or not hasattr(terrain, "update_env_origins"):
+        return
+
+    levels = getattr(terrain, "terrain_levels", None)
+    cfg = getattr(terrain, "cfg", None)
+    terrain_gen = getattr(cfg, "terrain_generator", None) if cfg is not None else None
+    num_rows = getattr(terrain_gen, "num_rows", None)
+    if levels is None or num_rows is None:
+        return
+
+    # Clamp target
+    target_level = 0 if target == "min" else int(num_rows - 1)
+
+    try:
+        cur_levels = levels[env_ids].clone()
+    except Exception:
+        return
+
+    # Move step-by-step to target using update_env_origins
+    for _ in range(int(num_rows)):
+        try:
+            cur_levels = levels[env_ids].clone()
+        except Exception:
+            break
+        move_up = cur_levels < target_level
+        move_down = cur_levels > target_level
+        if not (move_up.any() or move_down.any()):
+            break
+        terrain.update_env_origins(env_ids, move_up, move_down)
+
 
 
 # parse configuration
@@ -159,6 +231,7 @@ for setting in settings:
         leg_strength_scale=setting["leg_strength_scale"],
         friction=setting["friction"],
     )
+    _update_origin_marker(env_unwrapped, env_ids)
     mdp.verify_rma_env_factors(env_unwrapped, env_ids, max_envs=1, prefix="[RMA:verify]")
     # print terrain encoding for this env
     terrain_enc = rma_mdp._terrain_encoding_from_env(env_unwrapped, env_ids)
@@ -190,6 +263,7 @@ for setting in settings:
                     leg_strength_scale=setting["leg_strength_scale"],
                     friction=setting["friction"],
                 )
+                _update_origin_marker(env_unwrapped, reset_ids)
 
         # Force terrain changes over time (best-effort): update terrain origins then reset.
         if args_cli.terrain_change_interval > 0 and (step_idx % args_cli.terrain_change_interval) == 0:
@@ -209,8 +283,28 @@ for setting in settings:
                         leg_strength_scale=setting["leg_strength_scale"],
                         friction=setting["friction"],
                     )
+                    _update_origin_marker(env_unwrapped, env_ids)
                 except Exception:
                     pass
+
+        # Force extremes (min/max) for clearer visualization.
+        if args_cli.terrain_extremes and (step_idx % args_cli.terrain_extreme_interval) == 0:
+            try:
+                target = "max" if ((step_idx // args_cli.terrain_extreme_interval) % 2) == 1 else "min"
+                _force_terrain_extreme(env_unwrapped, env_ids, target)
+                env.reset()
+                _apply_manual_et(
+                    env_unwrapped,
+                    env_ids,
+                    asset_cfg,
+                    mass_add_kg=setting["mass_add_kg"],
+                    com_xy_m=setting["com_xy_m"],
+                    leg_strength_scale=setting["leg_strength_scale"],
+                    friction=setting["friction"],
+                )
+                _update_origin_marker(env_unwrapped, env_ids)
+            except Exception:
+                pass
 
         # Show terrain changes over time
         if args_cli.print_interval > 0 and (step_idx % args_cli.print_interval) == 0:
