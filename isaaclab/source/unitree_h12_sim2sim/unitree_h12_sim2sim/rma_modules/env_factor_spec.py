@@ -7,8 +7,8 @@ from dataclasses import dataclass
 class RmaEtSpec:
     """Specification of the privileged environment-factor vector e_t for Unitree H12 RMA.
 
-    Leg-only variant (recommended starting point):
-    e_t = [payload(3), leg_strength(12), friction(1), terrain(3)]  -> 19 dims
+    Minimal variant: force + leg strength + friction + terrain
+    e_t = [payload_force(1), leg_strength(12), friction(1), terrain(4)]  -> 18 dims
 
     Ordering is fixed so that:
     - the env can pack e_t consistently
@@ -16,30 +16,28 @@ class RmaEtSpec:
     - sim2sim export can carry the same latent dimension
 
     Indices:
-      0: payload_mass_add_kg
-      1: payload_com_offset_x_m
-      2: payload_com_offset_y_m
+    0: payload_downward_force_N
 
-      3..14: leg_motor_strength_scale (12 values)
+    1..12: leg_motor_strength_scale (12 values, range 0.9-1.1)
 
-      15: ground_friction_coeff
+    13: ground_friction_coeff
 
-      16: terrain_slope_x (forward slope proxy)
-      17: terrain_slope_y (lateral slope proxy)
-      18: terrain_height_at_base_m
+    14: terrain_amplitude_m
+    15: terrain_lengthscale_m
+    16: terrain_noise_step_m
+    17: terrain_friction_coeff (mirrors index 13 for convenience)
 
     Notes:
-    - payload entries should be quasi-static per episode (sample once at reset/startup).
-    - strength scaling should be quasi-static per episode.
-    - friction should be quasi-static per episode (or per env instance).
-    - terrain slope/height are included here as *coarse/static* descriptors; if you want per-step local geometry,
-      treat that separately (geom encoder) rather than in e_t.
+    - payload should be quasi-static per episode (sample once at reset/startup).
+    - strength scaling should be quasi-static per episode (0.9-1.1 range).
+    - friction should be quasi-static per episode.
+    - terrain parameters are coarse/static descriptors of terrain generation.
     """
 
-    payload_dim: int = 3
+    payload_dim: int = 1
     leg_strength_dim: int = 12
     friction_dim: int = 1
-    terrain_dim: int = 3
+    terrain_dim: int = 4
 
     @property
     def dim(self) -> int:
@@ -47,20 +45,20 @@ class RmaEtSpec:
 
     @property
     def payload_slice(self) -> slice:
-        return slice(0, 3)
+        return slice(0, 1)
 
     @property
     def leg_strength_slice(self) -> slice:
-        return slice(3, 3 + self.leg_strength_dim)
+        return slice(1, 1 + self.leg_strength_dim)
 
     @property
     def friction_slice(self) -> slice:
-        start = 3 + self.leg_strength_dim
+        start = 1 + self.leg_strength_dim
         return slice(start, start + 1)
 
     @property
     def terrain_slice(self) -> slice:
-        start = 3 + self.leg_strength_dim + 1
+        start = 1 + self.leg_strength_dim + 1
         return slice(start, start + self.terrain_dim)
 
 

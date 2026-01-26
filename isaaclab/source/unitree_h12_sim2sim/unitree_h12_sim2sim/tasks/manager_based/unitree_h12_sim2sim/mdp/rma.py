@@ -47,6 +47,24 @@ def _read_body_masses_coms(
     if isinstance(body_ids, int):
         body_ids = [body_ids]
 
+    # Try data-based readback first (more stable across versions)
+    data = getattr(asset, "data", None)
+    if data is not None:
+        try:
+            masses_src = getattr(data, "body_masses", None) or getattr(data, "body_mass", None)
+            coms_src = (
+                getattr(data, "body_coms", None)
+                or getattr(data, "body_com", None)
+                or getattr(data, "body_com_pos", None)
+                or getattr(data, "body_com_pos_w", None)
+            )
+            if masses_src is not None and coms_src is not None:
+                masses = masses_src[env_ids][:, body_ids]
+                coms = coms_src[env_ids][:, body_ids, :]
+                return masses, coms
+        except Exception:
+            pass
+
     view = _get_body_view(asset)
     if view is None:
         return None, None
@@ -116,12 +134,14 @@ def _read_ground_friction(env: ManagerBasedRLEnv) -> float | None:
 
 
 def _terrain_encoding_from_env(env: ManagerBasedRLEnv, env_ids: torch.Tensor) -> torch.Tensor:
-    """Best-effort terrain encoding for bumps-only rough terrain.
+    """Best-effort terrain encoding for flat + bumps-only rough terrain.
 
-    Returns per-env tensor (N, 3):
-      [0] amplitude (noise_range max, scaled by vertical_scale if available)
-      [1] roughness step (noise_step, scaled by vertical_scale if available)
-      [2] curriculum difficulty in [0, 1]
+    Returns per-env tensor (N, 5):
+        [0] is_rough (0=flat, 1=rough)
+        [1] amplitude (noise_range max, scaled by vertical_scale if available)
+        [2] lengthscale (horizontal_scale, meters)
+        [3] noise_step (noise_step scaled by horizontal_scale if available)
+        [4] friction coefficient (best-effort readback)
     """
 
     device = env.device
@@ -144,23 +164,21 @@ def _terrain_encoding_from_env(env: ManagerBasedRLEnv, env_ids: torch.Tensor) ->
     if isinstance(sub_terrains, dict) and "random_rough" in sub_terrains:
         random_rough = sub_terrains["random_rough"]
 
-    # difficulty based on terrain levels (row index) if available
-    level_norm = torch.zeros((num,), device=device)
-    levels = getattr(terrain, "terrain_levels", None)
-    num_rows = getattr(terrain_gen, "num_rows", None)
-    if levels is not None and num_rows is not None and num_rows > 1:
+    # is_rough (best-effort: read terrain type if available)
+    is_rough = torch.ones((num,), device=device)
+    if isinstance(sub_terrains, dict):
         try:
-            level_vals = levels[env_ids].float().to(device=device)
-            level_norm = torch.clamp(level_vals / float(num_rows - 1), 0.0, 1.0)
-        except Exception:
-            pass
-
-    # map difficulty range if provided
-    difficulty_range = getattr(terrain_gen, "difficulty_range", None)
-    if difficulty_range is not None and len(difficulty_range) == 2:
-        try:
-            d0, d1 = float(difficulty_range[0]), float(difficulty_range[1])
-            level_norm = d0 + (d1 - d0) * level_norm
+            terrain_types = getattr(terrain, "terrain_types", None) or getattr(terrain, "terrain_type", None)
+            if terrain_types is not None:
+                type_ids = terrain_types[env_ids]
+                if isinstance(type_ids, torch.Tensor):
+                    type_ids = type_ids.detach().cpu().tolist()
+                names = list(sub_terrains.keys())
+                vals = []
+                for t_id in type_ids:
+                    name = names[int(t_id)] if int(t_id) < len(names) else None
+                    vals.append(0.0 if name == "flat" else 1.0)
+                is_rough = torch.tensor(vals, device=device, dtype=torch.float)
         except Exception:
             pass
 
@@ -169,22 +187,34 @@ def _terrain_encoding_from_env(env: ManagerBasedRLEnv, env_ids: torch.Tensor) ->
         noise_range = getattr(random_rough, "noise_range", None)
         noise_step = getattr(random_rough, "noise_step", None)
         vertical_scale = getattr(terrain_gen, "vertical_scale", 1.0)
+        horizontal_scale = getattr(terrain_gen, "horizontal_scale", 1.0)
 
         try:
             if noise_range is not None and len(noise_range) >= 2:
                 amp = float(noise_range[1]) * float(vertical_scale)
-                enc[:, 0] = amp
+                enc[:, 1] = amp * is_rough
         except Exception:
             pass
 
         try:
             if noise_step is not None:
-                enc[:, 1] = float(noise_step) * float(vertical_scale)
+                enc[:, 3] = float(noise_step) * float(horizontal_scale) * is_rough
         except Exception:
             pass
 
-    # difficulty encoding
-    enc[:, 2] = level_norm
+        try:
+            enc[:, 2] = float(horizontal_scale) * is_rough
+        except Exception:
+            pass
+
+    # is_rough flag
+    enc[:, 0] = is_rough
+
+    # friction (best-effort readback)
+    mu = _read_ground_friction(env)
+    if mu is not None:
+        enc[:, 4] = float(mu)
+
     return enc
 
 
@@ -233,30 +263,94 @@ def _try_set_body_mass_and_com(
         body_ids = [body_ids]
 
     view = _get_body_view(asset)
-    if view is None:
-        return
 
     # Apply mass
     try:
-        masses = view.get_masses()
-        # masses: (num_envs, num_bodies)
-        masses_env = masses[env_ids][:, body_ids]
-        masses_env = masses_env + mass_add_kg.unsqueeze(-1)
-        masses[env_ids[:, None], torch.tensor(body_ids, device=env.device)] = masses_env
-        # best-effort setter
-        if hasattr(view, "set_masses"):
-            view.set_masses(masses)
+        if view is not None:
+            masses = view.get_masses()
+            # masses: (num_envs, num_bodies)
+            masses_env = masses[env_ids][:, body_ids]
+            masses_env = masses_env + mass_add_kg.unsqueeze(-1)
+            masses[env_ids[:, None], torch.tensor(body_ids, device=env.device)] = masses_env
+            # best-effort setter
+            if hasattr(view, "set_masses"):
+                view.set_masses(masses)
+        else:
+            data = getattr(asset, "data", None)
+            if data is not None:
+                masses_src = getattr(data, "body_masses", None) or getattr(data, "body_mass", None)
+                if masses_src is not None:
+                    masses_src[env_ids[:, None], torch.tensor(body_ids, device=env.device)] = (
+                        masses_src[env_ids][:, body_ids] + mass_add_kg.unsqueeze(-1)
+                    )
+                    if hasattr(asset, "write_body_masses_to_sim"):
+                        asset.write_body_masses_to_sim(masses_src)
+                    elif hasattr(asset, "write_data_to_sim"):
+                        asset.write_data_to_sim()
+    except Exception:
+        pass
+
+
+def _apply_downward_force(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    env_ids: torch.Tensor,
+    force_n: torch.Tensor,
+) -> None:
+    """Best-effort: apply a downward external force on the specified bodies."""
+
+    try:
+        asset = _resolve_asset(env, asset_cfg)
+    except Exception:
+        return
+
+    body_ids = getattr(asset_cfg, "body_ids", None)
+    if body_ids is None:
+        return
+    if isinstance(body_ids, int):
+        body_ids = [body_ids]
+
+    data = getattr(asset, "data", None)
+    if data is None or not hasattr(data, "body_external_force_w"):
+        return
+
+    try:
+        forces = data.body_external_force_w
+        forces[env_ids[:, None], torch.tensor(body_ids, device=env.device)] = 0.0
+        forces[env_ids[:, None], torch.tensor(body_ids, device=env.device), 2] = -force_n.unsqueeze(-1)
+        if hasattr(asset, "write_body_external_force_to_sim"):
+            asset.write_body_external_force_to_sim(forces)
+        elif hasattr(asset, "write_data_to_sim"):
+            asset.write_data_to_sim()
     except Exception:
         pass
 
     # Apply COM offset in x/y (keep z unchanged)
     try:
-        coms = view.get_coms()
-        coms_env = coms[env_ids][:, body_ids, :]
-        coms_env[..., 0:2] = coms_env[..., 0:2] + com_xy_m.unsqueeze(1)
-        coms[env_ids[:, None], torch.tensor(body_ids, device=env.device)] = coms_env
-        if hasattr(view, "set_coms"):
-            view.set_coms(coms)
+        if view is not None:
+            coms = view.get_coms()
+            coms_env = coms[env_ids][:, body_ids, :]
+            coms_env[..., 0:2] = coms_env[..., 0:2] + com_xy_m.unsqueeze(1)
+            coms[env_ids[:, None], torch.tensor(body_ids, device=env.device)] = coms_env
+            if hasattr(view, "set_coms"):
+                view.set_coms(coms)
+        else:
+            data = getattr(asset, "data", None)
+            if data is not None:
+                coms_src = (
+                    getattr(data, "body_coms", None)
+                    or getattr(data, "body_com", None)
+                    or getattr(data, "body_com_pos", None)
+                    or getattr(data, "body_com_pos_w", None)
+                )
+                if coms_src is not None:
+                    coms_env = coms_src[env_ids][:, body_ids, :]
+                    coms_env[..., 0:2] = coms_env[..., 0:2] + com_xy_m.unsqueeze(1)
+                    coms_src[env_ids[:, None], torch.tensor(body_ids, device=env.device)] = coms_env
+                    if hasattr(asset, "write_body_coms_to_sim"):
+                        asset.write_body_coms_to_sim(coms_src)
+                    elif hasattr(asset, "write_data_to_sim"):
+                        asset.write_data_to_sim()
     except Exception:
         pass
 
@@ -352,7 +446,7 @@ def sample_rma_env_factors(
     env_ids: torch.Tensor,
     asset_cfg: SceneEntityCfg,
     *,
-    payload_mass_range_kg: tuple[float, float] = (0, 3.0),
+    payload_force_range_n: tuple[float, float] = (0.0, 50.0),
     payload_com_range_m: float = 0.03,
     leg_strength_range: tuple[float, float] = (0.9, 1.1),
     friction_range: tuple[float, float] = (0.9, 1.1),
@@ -375,8 +469,8 @@ def sample_rma_env_factors(
     et = _ensure_buffer(env, "rma_env_factors_buf", DEFAULT_ET_SPEC.dim)
 
     # --- sample
-    payload_mass_add = torch.empty((num,), device=device).uniform_(*payload_mass_range_kg)
-    payload_com_xy = torch.empty((num, 2), device=device).uniform_(-payload_com_range_m, payload_com_range_m)
+    payload_force = torch.empty((num,), device=device).uniform_(*payload_force_range_n)
+    payload_com_xy = torch.zeros((num, 2), device=device)
 
     leg_strength = torch.empty((num, DEFAULT_ET_SPEC.leg_strength_dim), device=device).uniform_(*leg_strength_range)
 
@@ -388,7 +482,7 @@ def sample_rma_env_factors(
 
     # --- pack
     et_env = et[env_ids]
-    et_env[:, 0] = payload_mass_add
+    et_env[:, 0] = payload_force
     et_env[:, 1:3] = payload_com_xy
     et_env[:, DEFAULT_ET_SPEC.leg_strength_slice] = leg_strength
     et_env[:, DEFAULT_ET_SPEC.friction_slice] = friction.unsqueeze(-1)
@@ -401,12 +495,12 @@ def sample_rma_env_factors(
 
     # --- apply (best-effort)
     if apply_to_sim:
-        _try_set_body_mass_and_com(env, asset_cfg, env_ids, payload_mass_add, payload_com_xy)
+        _apply_downward_force(env, asset_cfg, env_ids, payload_force)
         _try_set_leg_effort_limits(env, asset_cfg, env_ids, leg_strength, LEG_JOINT_NAMES)
         _try_set_ground_friction(env, friction)
 
     # Keep a copy for debugging
-    env.rma_payload_mass_add_kg = payload_mass_add
+    env.rma_payload_force_n = payload_force
     env.rma_payload_com_xy_m = payload_com_xy
     env.rma_leg_strength_scale = leg_strength
     env.rma_ground_friction_coeff = friction
@@ -453,14 +547,14 @@ def verify_rma_env_factors(
     def _stats(x: torch.Tensor) -> tuple[float, float, float]:
         return float(x.mean().item()), float(x.min().item()), float(x.max().item())
 
-    m_mass_add, mi_mass_add, ma_mass_add = _stats(payload[:, 0])
+    m_force, mi_force, ma_force = _stats(payload[:, 0])
     m_cx_add, mi_cx_add, ma_cx_add = _stats(payload[:, 1])
     m_cy_add, mi_cy_add, ma_cy_add = _stats(payload[:, 2])
     m_ls, mi_ls, ma_ls = _stats(leg_strength)
     m_mu, mi_mu, ma_mu = _stats(friction)
 
     _emit(
-        f"{prefix} sampled e_t | mass_add={m_mass_add:.3f}/{mi_mass_add:.3f}/{ma_mass_add:.3f} kg | "
+        f"{prefix} sampled e_t | down_force={m_force:.3f}/{mi_force:.3f}/{ma_force:.3f} N | "
         f"com_x_add={m_cx_add:.3f}/{mi_cx_add:.3f}/{ma_cx_add:.3f} m | "
         f"com_y_add={m_cy_add:.3f}/{mi_cy_add:.3f}/{ma_cy_add:.3f} m | "
         f"leg_strength={m_ls:.3f}/{mi_ls:.3f}/{ma_ls:.3f} | friction={m_mu:.3f}/{mi_mu:.3f}/{ma_mu:.3f}"

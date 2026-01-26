@@ -43,6 +43,12 @@ from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 ##############################################################
 
+# Terrain mix: flat + randomized bumps-only rough
+TERRAIN_FLAT_PROPORTION = 0.3
+TERRAIN_ROUGH_PROPORTION = 0.7
+TERRAIN_NOISE_RANGE = (0.05, 0.25)
+TERRAIN_NOISE_STEP = 0.05
+
 ROUGH_TERRAINS_CFG = terrain_gen.TerrainGeneratorCfg(
     size=(8.0, 8.0),
     border_width=20.0,
@@ -54,11 +60,18 @@ ROUGH_TERRAINS_CFG = terrain_gen.TerrainGeneratorCfg(
     difficulty_range=(0.0, 1.0),
     use_cache=False,
     sub_terrains={
+        # Flat terrain (zero-height noise)
+        "flat": terrain_gen.HfRandomUniformTerrainCfg(
+            proportion=TERRAIN_FLAT_PROPORTION,
+            noise_range=(0.0, 0.0),
+            noise_step=TERRAIN_NOISE_STEP,
+            border_width=0.25,
+        ),
         # Bumps-only terrain (random rough heightfield)
         "random_rough": terrain_gen.HfRandomUniformTerrainCfg(
-            proportion=1.0,
-            noise_range=(0.02, 0.10),
-            noise_step=0.02,
+            proportion=TERRAIN_ROUGH_PROPORTION,
+            noise_range=TERRAIN_NOISE_RANGE,
+            noise_step=TERRAIN_NOISE_STEP,
             border_width=0.25,
         ),
     },
