@@ -1,0 +1,21 @@
+--- Current Repository State ---
+Branch: main
+Current commit: 3b39c5827ea56f5d491cb7df48c6fb83c1f39d87
+Working directory: /home/niraj/isaac_projects/unitree_h12_rma
+
+--- Current Branch Commit History ---
+3b39c58 add viz et sampling
+9915217 verified force, and joints
+262b9f7 add leg strenght code
+0cd7f22 redefine et and test force done
+19e1f7f del vids
+d33c022 add viz
+850f875 add et sampling andd curr
+eb59cf7 added printing for exts
+efb2601 add rma modules and new cfg env
+743d8ec Initial commit
+
+--- Remote Information ---
+Remote: origin
+  URL: git@github.com:correlllab/unitree_h12_rma.git
+
