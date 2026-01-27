@@ -134,14 +134,15 @@ def _read_ground_friction(env: ManagerBasedRLEnv) -> float | None:
 
 
 def _terrain_encoding_from_env(env: ManagerBasedRLEnv, env_ids: torch.Tensor) -> torch.Tensor:
-    """Best-effort terrain encoding for flat + bumps-only rough terrain.
+    """Best-effort terrain encoding for bumps-only rough terrain.
 
-    Returns per-env tensor (N, 5):
-        [0] is_rough (0=flat, 1=rough)
-        [1] amplitude (noise_range max, scaled by vertical_scale if available)
-        [2] lengthscale (horizontal_scale, meters)
-        [3] noise_step (noise_step scaled by horizontal_scale if available)
-        [4] friction coefficient (best-effort readback)
+    Returns per-env tensor (N, 4):
+        [0] amplitude (noise_range max, scaled by vertical_scale if available)
+        [1] lengthscale (horizontal_scale, meters)
+        [2] noise_step (noise_step scaled by horizontal_scale if available)
+        [3] friction coefficient (best-effort readback)
+    
+    Note: is_rough flag removed; terrain is always bumps-only rough when available.
     """
 
     device = env.device
@@ -164,56 +165,36 @@ def _terrain_encoding_from_env(env: ManagerBasedRLEnv, env_ids: torch.Tensor) ->
     if isinstance(sub_terrains, dict) and "random_rough" in sub_terrains:
         random_rough = sub_terrains["random_rough"]
 
-    # is_rough (best-effort: read terrain type if available)
-    is_rough = torch.ones((num,), device=device)
-    if isinstance(sub_terrains, dict):
-        try:
-            terrain_types = getattr(terrain, "terrain_types", None) or getattr(terrain, "terrain_type", None)
-            if terrain_types is not None:
-                type_ids = terrain_types[env_ids]
-                if isinstance(type_ids, torch.Tensor):
-                    type_ids = type_ids.detach().cpu().tolist()
-                names = list(sub_terrains.keys())
-                vals = []
-                for t_id in type_ids:
-                    name = names[int(t_id)] if int(t_id) < len(names) else None
-                    vals.append(0.0 if name == "flat" else 1.0)
-                is_rough = torch.tensor(vals, device=device, dtype=torch.float)
-        except Exception:
-            pass
-
-    # amplitude + roughness step (best-effort)
+    # amplitude (best-effort)
     if random_rough is not None:
         noise_range = getattr(random_rough, "noise_range", None)
-        noise_step = getattr(random_rough, "noise_step", None)
         vertical_scale = getattr(terrain_gen, "vertical_scale", 1.0)
         horizontal_scale = getattr(terrain_gen, "horizontal_scale", 1.0)
 
         try:
             if noise_range is not None and len(noise_range) >= 2:
                 amp = float(noise_range[1]) * float(vertical_scale)
-                enc[:, 1] = amp * is_rough
+                enc[:, 0] = amp
         except Exception:
             pass
 
         try:
+            if noise_range is not None and len(noise_range) >= 2:
+                enc[:, 1] = float(horizontal_scale)
+        except Exception:
+            pass
+
+        try:
+            noise_step = getattr(random_rough, "noise_step", None)
             if noise_step is not None:
-                enc[:, 3] = float(noise_step) * float(horizontal_scale) * is_rough
+                enc[:, 2] = float(noise_step) * float(horizontal_scale)
         except Exception:
             pass
-
-        try:
-            enc[:, 2] = float(horizontal_scale) * is_rough
-        except Exception:
-            pass
-
-    # is_rough flag
-    enc[:, 0] = is_rough
 
     # friction (best-effort readback)
     mu = _read_ground_friction(env)
     if mu is not None:
-        enc[:, 4] = float(mu)
+        enc[:, 3] = float(mu)
 
     return enc
 
@@ -447,19 +428,22 @@ def sample_rma_env_factors(
     asset_cfg: SceneEntityCfg,
     *,
     payload_force_range_n: tuple[float, float] = (0.0, 50.0),
-    payload_com_range_m: float = 0.03,
     leg_strength_range: tuple[float, float] = (0.9, 1.1),
     friction_range: tuple[float, float] = (0.9, 1.1),
     apply_to_sim: bool = True,
 ) -> None:
-    """Sample + store privileged e_t, and best-effort apply to the simulator.
+    """Sample + store privileged e_t (18D: force + leg_strength + friction + terrain), and apply to simulator.
 
-    Stores into `env.rma_env_factors_buf` with the ordering defined by DEFAULT_ET_SPEC.
+    Stores into `env.rma_env_factors_buf` with the ordering defined by DEFAULT_ET_SPEC:
+      - payload_force_n (1D): downward force in Newtons
+      - leg_strength_scale (12D): multiplicative scale on joint effort limits for each leg joint
+      - ground_friction_coeff (1D): friction coefficient
+      - terrain_params (4D): amplitude, lengthscale, noise_step, friction
 
     Args:
         env_ids: environments being reset.
-        asset_cfg: Scene entity (robot) used for applying payload/strength.
-        apply_to_sim: if True, attempts to apply mass/COM and leg effort limit scaling.
+        asset_cfg: Scene entity (robot) used for applying payload and leg strength.
+        apply_to_sim: if True, attempts to apply force, effort limits, and friction.
     """
 
     device = env.device
@@ -470,7 +454,6 @@ def sample_rma_env_factors(
 
     # --- sample
     payload_force = torch.empty((num,), device=device).uniform_(*payload_force_range_n)
-    payload_com_xy = torch.zeros((num, 2), device=device)
 
     leg_strength = torch.empty((num, DEFAULT_ET_SPEC.leg_strength_dim), device=device).uniform_(*leg_strength_range)
 
@@ -482,8 +465,7 @@ def sample_rma_env_factors(
 
     # --- pack
     et_env = et[env_ids]
-    et_env[:, 0] = payload_force
-    et_env[:, 1:3] = payload_com_xy
+    et_env[:, DEFAULT_ET_SPEC.payload_slice] = payload_force.unsqueeze(-1)
     et_env[:, DEFAULT_ET_SPEC.leg_strength_slice] = leg_strength
     et_env[:, DEFAULT_ET_SPEC.friction_slice] = friction.unsqueeze(-1)
     et_env[:, DEFAULT_ET_SPEC.terrain_slice] = terrain
@@ -501,7 +483,6 @@ def sample_rma_env_factors(
 
     # Keep a copy for debugging
     env.rma_payload_force_n = payload_force
-    env.rma_payload_com_xy_m = payload_com_xy
     env.rma_leg_strength_scale = leg_strength
     env.rma_ground_friction_coeff = friction
 
@@ -548,15 +529,11 @@ def verify_rma_env_factors(
         return float(x.mean().item()), float(x.min().item()), float(x.max().item())
 
     m_force, mi_force, ma_force = _stats(payload[:, 0])
-    m_cx_add, mi_cx_add, ma_cx_add = _stats(payload[:, 1])
-    m_cy_add, mi_cy_add, ma_cy_add = _stats(payload[:, 2])
     m_ls, mi_ls, ma_ls = _stats(leg_strength)
     m_mu, mi_mu, ma_mu = _stats(friction)
 
     _emit(
         f"{prefix} sampled e_t | down_force={m_force:.3f}/{mi_force:.3f}/{ma_force:.3f} N | "
-        f"com_x_add={m_cx_add:.3f}/{mi_cx_add:.3f}/{ma_cx_add:.3f} m | "
-        f"com_y_add={m_cy_add:.3f}/{mi_cy_add:.3f}/{ma_cy_add:.3f} m | "
         f"leg_strength={m_ls:.3f}/{mi_ls:.3f}/{ma_ls:.3f} | friction={m_mu:.3f}/{mi_mu:.3f}/{ma_mu:.3f}"
     )
 
@@ -569,11 +546,8 @@ def verify_rma_env_factors(
     masses, coms = _read_body_masses_coms(env, asset_cfg, env_ids_show)
     if masses is not None and coms is not None:
         m_mass, mi_mass, ma_mass = _stats(masses.reshape(-1))
-        m_cx, mi_cx, ma_cx = _stats(coms[..., 0].reshape(-1))
-        m_cy, mi_cy, ma_cy = _stats(coms[..., 1].reshape(-1))
         _emit(
-            f"{prefix} readback torso mass/com (absolute) | mass={m_mass:.3f}/{mi_mass:.3f}/{ma_mass:.3f} kg | "
-            f"com_x={m_cx:.3f}/{mi_cx:.3f}/{ma_cx:.3f} m | com_y={m_cy:.3f}/{mi_cy:.3f}/{ma_cy:.3f} m"
+            f"{prefix} readback torso mass (absolute) | mass={m_mass:.3f}/{mi_mass:.3f}/{ma_mass:.3f} kg"
         )
 
         if hasattr(env, "_rma_baseline_masses"):
@@ -583,17 +557,8 @@ def verify_rma_env_factors(
                 err = masses - expected
                 m_e, mi_e, ma_e = _stats(err.reshape(-1))
                 _emit(f"{prefix} mass delta error (actual - expected) mean/min/max={m_e:.3f}/{mi_e:.3f}/{ma_e:.3f} kg")
-
-        if hasattr(env, "_rma_baseline_coms"):
-            baseline_c = env._rma_baseline_coms
-            if baseline_c is not None and isinstance(baseline_c, torch.Tensor) and baseline_c.shape == coms.shape:
-                expected_c = baseline_c.clone()
-                expected_c[..., 0:2] = expected_c[..., 0:2] + payload[:, 1:3].unsqueeze(1)
-                err = coms - expected_c
-                m_e, mi_e, ma_e = _stats(err[..., 0:2].reshape(-1))
-                _emit(f"{prefix} com_xy delta error (actual - expected) mean/min/max={m_e:.4f}/{mi_e:.4f}/{ma_e:.4f} m")
     else:
-        _emit(f"{prefix} could not read back torso mass/COM.")
+        _emit(f"{prefix} could not read back torso mass.")
 
     limits, _ = _read_leg_effort_limits(env, asset_cfg, env_ids_show, LEG_JOINT_NAMES)
     if limits is not None:
@@ -689,9 +654,7 @@ def print_rma_env_factors(
     def _stats(x: torch.Tensor) -> tuple[float, float, float]:
         return float(x.mean().item()), float(x.min().item()), float(x.max().item())
 
-    m_mass, mi_mass, ma_mass = _stats(payload[:, 0])
-    m_cx, mi_cx, ma_cx = _stats(payload[:, 1])
-    m_cy, mi_cy, ma_cy = _stats(payload[:, 2])
+    m_force, mi_force, ma_force = _stats(payload[:, 0])
     m_ls, mi_ls, ma_ls = _stats(leg_strength)
     m_mu, mi_mu, ma_mu = _stats(friction)
 
@@ -722,9 +685,7 @@ def print_rma_env_factors(
 
     _emit(
         f"{prefix}{step_str} e_t stats over {env_ids.numel()} envs | "
-        f"mass(mean/min/max)={m_mass:.3f}/{mi_mass:.3f}/{ma_mass:.3f} kg | "
-        f"com_x={m_cx:.3f}/{mi_cx:.3f}/{ma_cx:.3f} m | "
-        f"com_y={m_cy:.3f}/{mi_cy:.3f}/{ma_cy:.3f} m | "
+        f"force(mean/min/max)={m_force:.3f}/{mi_force:.3f}/{ma_force:.3f} N | "
         f"leg_strength={m_ls:.3f}/{mi_ls:.3f}/{ma_ls:.3f} | "
         f"friction={m_mu:.3f}/{mi_mu:.3f}/{ma_mu:.3f}"
     )
