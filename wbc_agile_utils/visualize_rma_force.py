@@ -34,12 +34,13 @@ import cli_args  # isort: skip
 parser = argparse.ArgumentParser(description="Apply external wrench to torso_link via RMA e_t[0].")
 parser.add_argument("--task", type=str, required=True, help="Name of the task.")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments.")
-parser.add_argument("--steps", type=int, default=300, help="Steps to run.")
+parser.add_argument("--steps", type=int, default=1000, help="Steps to run.")
+
 parser.add_argument(
     "--push_range",
     type=float,
     nargs=2,
-    default=(0.0, 50.0),
+    default=(0.0, 50.0), # ~ around 5kgs
     help="Min/max constant downward force (N). ~1 N per kg.",
 )
 
@@ -103,7 +104,7 @@ et = rma_mdp._ensure_buffer(env_unwrapped, "rma_env_factors_buf", DEFAULT_ET_SPE
 
 # Sample a constant downward force (like mass attached to torso)
 push_min, push_max = float(args_cli.push_range[0]), float(args_cli.push_range[1])
-constant_force = torch.rand((env_unwrapped.num_envs, 1), device=env_unwrapped.device) * (push_max - push_min) + push_min
+constant_force = rma_mdp.sample_payload_force(env_ids, env_unwrapped.device, (push_min, push_max))
 
 print(f"[RMA] Starting simulation with constant downward force: {constant_force[0].item():.2f} N", flush=True)
 
@@ -114,7 +115,7 @@ for step_idx in range(args_cli.steps):
     # Apply the same constant downward force every step
     fx = torch.zeros((env_unwrapped.num_envs, 1), device=env_unwrapped.device)
     fy = torch.zeros((env_unwrapped.num_envs, 1), device=env_unwrapped.device)
-    fz = -constant_force
+    fz = -constant_force.unsqueeze(-1)  # Shape: (num_envs, 1)
 
     # Forces shape: (num_envs, len(body_ids), 3) = (num_envs, 1, 3)
     forces = torch.stack((fx, fy, fz), dim=-1)
@@ -140,7 +141,7 @@ for step_idx in range(args_cli.steps):
         print(f"[RMA] set_external_force_and_torque FAILED: {e}", flush=True)
 
     # Store force magnitude in e_t[0]
-    et[env_ids, 0] = constant_force.squeeze()
+    et[env_ids, 0] = constant_force
 
     # Write buffers BEFORE stepping (KEY POINT)
     try:
