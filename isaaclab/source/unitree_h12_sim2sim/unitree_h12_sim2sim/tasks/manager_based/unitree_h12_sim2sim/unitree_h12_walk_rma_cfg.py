@@ -106,10 +106,8 @@ class EventRmaCfg(_BaseEventCfg):
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="torso_link"),
-            "payload_mass_range_kg": (-1.0, 5.0),
-            "payload_com_range_m": 0.03,
+            "payload_force_range_n": (0.0, 50.0),
             "leg_strength_range": (0.9, 1.1),
-            "friction_range": (0.9, 1.1),
             "apply_to_sim": True,
         },
     )

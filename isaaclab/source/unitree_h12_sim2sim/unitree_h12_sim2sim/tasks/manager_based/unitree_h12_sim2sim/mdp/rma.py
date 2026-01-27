@@ -276,49 +276,10 @@ def _set_leg_effort_limits(
             limits[env_ids[:, None], torch.tensor(joint_ids, device=env.device)] = limits_env
             if hasattr(asset, "write_joint_effort_limits_to_sim"):
                 asset.write_joint_effort_limits_to_sim(limits)
+                #print after writing to verify
             return
     except Exception:
         pass
-
-
-def _set_ground_friction(env: "ManagerBasedRLEnv", friction_coeff: torch.Tensor) -> None:
-    """Best-effort: apply friction to the ground material.
-
-    Many IsaacLab setups use a single shared ground physics material across all envs. We therefore apply the mean
-    friction across the just-reset env_ids (still provides episode-to-episode variation).
-    """
-
-    try:
-        friction_val = float(torch.mean(friction_coeff).item())
-    except Exception:
-        return
-
-    # Try scene.terrain first
-    terrain = getattr(env.scene, "terrain", None)
-    if terrain is None:
-        try:
-            terrain = env.scene["terrain"]
-        except Exception:
-            terrain = None
-
-    if terrain is None:
-        return
-
-    # Common locations for the physics material
-    for obj in (getattr(terrain, "cfg", None), terrain, getattr(terrain, "physics_material", None)):
-        if obj is None:
-            continue
-        mat = getattr(obj, "physics_material", None)
-        if mat is None:
-            mat = obj if hasattr(obj, "static_friction") and hasattr(obj, "dynamic_friction") else None
-        if mat is None:
-            continue
-        try:
-            mat.static_friction = friction_val
-            mat.dynamic_friction = friction_val
-            return
-        except Exception:
-            continue
 
 
 def sample_rma_env_factors(
@@ -328,16 +289,19 @@ def sample_rma_env_factors(
     *,
     payload_force_range_n: tuple[float, float] = (0.0, 50.0),
     leg_strength_range: tuple[float, float] = (0.9, 1.1),
-    friction_range: tuple[float, float] = (0.9, 1.1),
     apply_to_sim: bool = True,
 ) -> None:
     """Sample + store + apply e_t (17D: force + leg_strength + friction + terrain).
 
-    Currently active factors (incrementally verified):
-      - e_t[0] (1D): downward force in Newtons
-      - e_t[1:13] (12D): leg joint strength scales
-      - e_t[13] (1D): friction (stored, not applied)
-      - e_t[14:17] (3D): terrain encoding (stored, not applied)
+    Active factors (sampled & applied):
+      - e_t[0] (1D): downward force in Newtons → applied as external wrench
+      - e_t[1:13] (12D): leg joint strength scales → applied as torque limit scaling
+
+    Read-only factors (curriculum-controlled, observed by encoder):
+      - e_t[13] (1D): ground friction coefficient (cached baseline, not modified)
+      - e_t[14:17] (3D): terrain encoding (read from env_factor_spec, not modified)
+
+    Terrain parameters are controlled by external curriculum; we only read and encode them for the RMA encoder.
 
     Args:
         env_ids: environments being reset.
@@ -354,8 +318,9 @@ def sample_rma_env_factors(
     payload_force = sample_payload_force(env_ids, device, payload_force_range_n)
     leg_strength = sample_leg_strength_scale(env_ids, device, DEFAULT_ET_SPEC.leg_strength_dim, leg_strength_range)
 
-    # Initialize other factors to default (will be added after verification)
-    friction = torch.ones((env_ids.numel(),), device=device)
+    # --- read curriculum-controlled factors (read-only, observed by encoder)
+    friction_val = _read_ground_friction(env)
+    friction = torch.full((env_ids.numel(),), friction_val if friction_val is not None else 1.0, device=device)
     terrain = _terrain_encoding_from_env(env, env_ids)
 
     # --- pack e_t buffer
@@ -566,76 +531,6 @@ def print_rma_env_factors(
         f"friction={m_mu:.3f}/{mi_mu:.3f}/{ma_mu:.3f}"
     )
     _emit(f"{prefix} sample env_ids={env_ids_show} e_t[:{n_show}]={samples_show}")
-
-
-def rma_change_terrain_interval(
-    env: "ManagerBasedRLEnv",
-    env_ids: torch.Tensor | None,
-    step_interval: int = 100,
-    change_prob: float = 0.5,
-    do_reset: bool = True,
-) -> None:
-    """Best-effort terrain change and e_t terrain-slice refresh on an interval.
-
-    This mirrors the visualization behavior but runs inside the training pipeline.
-    """
-
-    if step_interval <= 0:
-        return
-
-    step_val = (
-        getattr(env, "common_step_counter", None)
-        or getattr(env, "_step_count", None)
-        or getattr(env, "step_count", None)
-    )
-    step_int: int | None = None
-    try:
-        if isinstance(step_val, torch.Tensor):
-            step_int = int(step_val.item())
-        elif step_val is not None:
-            step_int = int(step_val)
-    except Exception:
-        step_int = None
-
-    if step_int is None:
-        step_int = int(getattr(env, "_rma_terrain_step_counter", 0)) + 1
-        setattr(env, "_rma_terrain_step_counter", step_int)
-
-    if step_int == 0 or (step_int % step_interval) != 0:
-        return
-
-    if env_ids is None:
-        env_ids = torch.arange(env.num_envs, device=env.device)
-    else:
-        env_ids = env_ids.to(device=env.device)
-    if env_ids.numel() == 0:
-        return
-
-    terrain = getattr(env.scene, "terrain", None)
-    if terrain is None or not hasattr(terrain, "update_env_origins"):
-        return
-
-    move_up = torch.rand((env_ids.numel(),), device=env.device) < float(change_prob)
-    move_down = torch.zeros_like(move_up, dtype=torch.bool)
-    try:
-        terrain.update_env_origins(env_ids, move_up, move_down)
-    except Exception:
-        return
-
-    if do_reset:
-        try:
-            env.reset(env_ids)
-        except Exception:
-            pass
-
-    # Refresh terrain encoding slice in e_t (if buffer exists).
-    et = getattr(env, "rma_env_factors_buf", None)
-    if et is None or not isinstance(et, torch.Tensor):
-        return
-
-    enc = _terrain_encoding_from_env(env, env_ids)
-    if enc is not None:
-        et[env_ids, DEFAULT_ET_SPEC.terrain_slice] = enc
 
 
 def print_rma_env_factors_once(
