@@ -11,8 +11,12 @@ import argparse
 import sys
 from pathlib import Path
 
+
 # Add isaaclab scripts directory to path for cli_args import
 sys.path.insert(0, str(Path(__file__).parent.parent / "isaaclab" / "scripts" / "rsl_rl"))
+
+# Ensure environment registration is executed before training
+import isaaclab.source.unitree_h12_sim2sim.unitree_h12_sim2sim.tasks.manager_based.unitree_h12_sim2sim  # noqa: F401
 
 from isaaclab.app import AppLauncher
 
