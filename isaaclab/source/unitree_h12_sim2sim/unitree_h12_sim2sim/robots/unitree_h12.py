@@ -50,7 +50,9 @@ H12_CFG_HANDLESS = ArticulationCfg(
         replace_cylinders_with_capsules=True,
 
         #laptop path - fixed with isaac_projects
-        asset_path= "/home/niraj/isaac_projects/unitree_h12_sim2sim/isaaclab/source/unitree_h12_sim2sim/unitree_h12_sim2sim/robots/h1-2/h1_2_handless.urdf",
+        asset_path= "/home/niraj/unitree_h12_rma/isaaclab/source/unitree_h12_sim2sim/unitree_h12_sim2sim/robots/h1-2/h1_2_handless.urdf",
+        
+        #asset_path= "/home/niraj/isaac_projects/unitree_h12_sim2sim/isaaclab/source/unitree_h12_sim2sim/unitree_h12_sim2sim/robots/h1-2/h1_2_handless.urdf",
         activate_contact_sensors=True,
 
         rigid_props=sim_utils.RigidBodyPropertiesCfg(

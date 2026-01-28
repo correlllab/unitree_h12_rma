@@ -82,65 +82,6 @@ def _read_ground_friction(env: ManagerBasedRLEnv) -> float | None:
     return None
 
 
-def _terrain_encoding_from_env(env: ManagerBasedRLEnv, env_ids: torch.Tensor) -> torch.Tensor:
-    """Best-effort terrain encoding for bumps-only rough terrain.
-
-    Returns per-env tensor (N, 3):
-        [0] amplitude (mean of noise_range, scaled by vertical_scale)
-        [1] lengthscale (horizontal_scale, meters)
-        [2] noise_step (perlin noise parameter, unitless)
-    
-    Note: is_rough flag removed; terrain is always bumps-only rough when available.
-    """
-
-    device = env.device
-    num = env_ids.numel()
-    enc_terrain = torch.zeros((num, DEFAULT_ET_SPEC.terrain_dim), device=device)
-
-    # try to access terrain generator config
-    try:
-        terrain = getattr(env.scene, "terrain", None)
-        if terrain is None:
-            return enc_terrain
-
-        cfg = getattr(terrain, "cfg", None)
-        terrain_gen = getattr(cfg, "terrain_generator", None) if cfg is not None else None
-        if terrain_gen is None:
-            return enc_terrain
-
-        # use bumps-only random rough config when available
-        sub_terrains = getattr(terrain_gen, "sub_terrains", None)
-        random_rough = None
-        
-        if isinstance(sub_terrains, dict) and "random_rough" in sub_terrains:
-            random_rough = sub_terrains["random_rough"]
-
-        if random_rough is None:
-            return enc_terrain
-
-        # Extract terrain parameters
-        noise_range = getattr(random_rough, "noise_range", None)
-        vertical_scale = getattr(terrain_gen, "vertical_scale", 1.0)
-        horizontal_scale = getattr(terrain_gen, "horizontal_scale", 1.0)
-        noise_step = getattr(random_rough, "noise_step", None)
-
-        # amplitude: mean of noise_range, scaled by vertical_scale
-        if noise_range is not None and len(noise_range) >= 2:
-            amp_mean = (float(noise_range[0]) + float(noise_range[1])) / 2.0
-            amp = amp_mean * float(vertical_scale)
-            enc_terrain[:, 0] = amp
-
-        # lengthscale: horizontal_scale directly
-        enc_terrain[:, 1] = float(horizontal_scale)
-
-        # noise_step: perlin noise parameter (unitless)
-        if noise_step is not None:
-            enc_terrain[:, 2] = float(noise_step)
-
-    except Exception:
-        pass
-
-    return enc_terrain
 
 
 def _maybe_cache_baselines(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, env_ids: torch.Tensor) -> None:
@@ -282,6 +223,7 @@ def _set_leg_effort_limits(
         pass
 
 
+
 def sample_rma_env_factors(
     env: ManagerBasedRLEnv,
     env_ids: torch.Tensor,
@@ -291,17 +233,12 @@ def sample_rma_env_factors(
     leg_strength_range: tuple[float, float] = (0.9, 1.1),
     apply_to_sim: bool = True,
 ) -> None:
-    """Sample + store + apply e_t (17D: force + leg_strength + friction + terrain).
+    """Sample + store + apply e_t (14D: force + leg_strength + friction).
 
     Active factors (sampled & applied):
-      - e_t[0] (1D): downward force in Newtons → applied as external wrench
-      - e_t[1:13] (12D): leg joint strength scales → applied as torque limit scaling
-
-    Read-only factors (curriculum-controlled, observed by encoder):
-      - e_t[13] (1D): ground friction coefficient (cached baseline, not modified)
-      - e_t[14:17] (3D): terrain encoding (read from env_factor_spec, not modified)
-
-    Terrain parameters are controlled by external curriculum; we only read and encode them for the RMA encoder.
+        - e_t[0] (1D): downward force in Newtons → applied as external wrench
+        - e_t[1:13] (12D): leg joint strength scales → applied as torque limit scaling
+        - e_t[13] (1D): ground friction coefficient (cached baseline, not modified)
 
     Args:
         env_ids: environments being reset.
@@ -318,17 +255,15 @@ def sample_rma_env_factors(
     payload_force = sample_payload_force(env_ids, device, payload_force_range_n)
     leg_strength = sample_leg_strength_scale(env_ids, device, DEFAULT_ET_SPEC.leg_strength_dim, leg_strength_range)
 
-    # --- read curriculum-controlled factors (read-only, observed by encoder)
+    # --- read curriculum-controlled factor (friction only)
     friction_val = _read_ground_friction(env)
     friction = torch.full((env_ids.numel(),), friction_val if friction_val is not None else 1.0, device=device)
-    terrain = _terrain_encoding_from_env(env, env_ids)
 
-    # --- pack e_t buffer
+    # --- pack e_t buffer (14D: payload, leg_strength, friction)
     et_env = et[env_ids]
     et_env[:, DEFAULT_ET_SPEC.payload_slice] = payload_force.unsqueeze(-1)
     et_env[:, DEFAULT_ET_SPEC.leg_strength_slice] = leg_strength
     et_env[:, DEFAULT_ET_SPEC.friction_slice] = friction.unsqueeze(-1)
-    et_env[:, DEFAULT_ET_SPEC.terrain_slice] = terrain
     et[env_ids] = et_env
 
     # Cache baselines before any modifications
@@ -343,208 +278,3 @@ def sample_rma_env_factors(
     # Store for debugging
     env.rma_payload_force_n = payload_force
     env.rma_leg_strength_scale = leg_strength
-
-
-def verify_rma_env_factors(
-    env: "ManagerBasedRLEnv",
-    env_ids: torch.Tensor | None,
-    max_envs: int,
-    prefix: str,
-) -> None:
-    """Verify whether sampled e_t factors appear applied in the simulator (best-effort)."""
-
-    def _emit(msg: str) -> None:
-        print(msg, flush=True)
-        try:
-            import omni.log  # type: ignore
-
-            omni.log.info(msg)
-        except Exception:
-            pass
-
-    if env_ids is None:
-        env_ids = torch.arange(env.num_envs, device=env.device)
-    else:
-        env_ids = env_ids.to(device=env.device)
-    if env_ids.numel() == 0:
-        return
-
-    n_show = int(min(max_envs, env_ids.numel()))
-    env_ids_show = env_ids[:n_show]
-
-    # Sampled values (from e_t)
-    et = getattr(env, "rma_env_factors_buf", None)
-    if et is None or not isinstance(et, torch.Tensor):
-        _emit(f"{prefix} e_t buffer missing; cannot verify applied values.")
-        return
-
-    et_sel = et[env_ids_show]
-    payload = et_sel[:, DEFAULT_ET_SPEC.payload_slice]
-    leg_strength = et_sel[:, DEFAULT_ET_SPEC.leg_strength_slice]
-    friction = et_sel[:, DEFAULT_ET_SPEC.friction_slice].squeeze(-1)
-
-    def _stats(x: torch.Tensor) -> tuple[float, float, float]:
-        return float(x.mean().item()), float(x.min().item()), float(x.max().item())
-
-    m_force, mi_force, ma_force = _stats(payload[:, 0])
-    m_ls, mi_ls, ma_ls = _stats(leg_strength)
-    m_mu, mi_mu, ma_mu = _stats(friction)
-
-    _emit(
-        f"{prefix} sampled e_t | down_force={m_force:.3f}/{mi_force:.3f}/{ma_force:.3f} N | "
-        f"leg_strength={m_ls:.3f}/{mi_ls:.3f}/{ma_ls:.3f} | friction={m_mu:.3f}/{mi_mu:.3f}/{ma_mu:.3f}"
-    )
-
-    # Readbacks (best-effort)
-    asset_cfg = getattr(env, "_rma_asset_cfg", None)
-    if asset_cfg is None:
-        _emit(f"{prefix} no asset_cfg cached; cannot read back effort limits.")
-        return
-
-    limits, _ = _read_leg_effort_limits(env, asset_cfg, env_ids_show, LEG_JOINT_NAMES)
-    if limits is not None:
-        m_l, mi_l, ma_l = _stats(limits.reshape(-1))
-        _emit(
-            f"{prefix} readback leg effort limits (absolute) mean/min/max={m_l:.3f}/{mi_l:.3f}/{ma_l:.3f}"
-        )
-
-        if hasattr(env, "_rma_baseline_effort_limits"):
-            baseline_l = env._rma_baseline_effort_limits
-            if baseline_l is not None and isinstance(baseline_l, torch.Tensor) and baseline_l.shape == limits.shape:
-                expected_l = baseline_l * leg_strength
-                err = limits - expected_l
-                m_e, mi_e, ma_e = _stats(err.reshape(-1))
-                _emit(f"{prefix} effort limit delta error (actual - expected) mean/min/max={m_e:.3f}/{mi_e:.3f}/{ma_e:.3f}")
-    else:
-        _emit(f"{prefix} could not read back leg effort limits.")
-
-    mu = _read_ground_friction(env)
-    if mu is not None:
-        _emit(f"{prefix} readback ground friction (absolute)={mu:.3f}")
-        if hasattr(env, "_rma_baseline_friction"):
-            baseline_mu = env._rma_baseline_friction
-            if baseline_mu is not None:
-                expected_mu = float(torch.mean(friction).item())
-                _emit(
-                    f"{prefix} friction delta (actual - expected mean)={mu - expected_mu:+.4f} (baseline={baseline_mu:.3f})"
-                )
-    else:
-        _emit(f"{prefix} could not read back ground friction.")
-
-
-def verify_rma_env_factors_once(
-    env: "ManagerBasedRLEnv",
-    env_ids: torch.Tensor | None,
-    max_envs: int,
-    prefix: str,
-) -> None:
-    """Run verification only once before training progresses."""
-
-    if getattr(env, "_rma_verify_once_done", False):
-        return
-    setattr(env, "_rma_verify_once_done", True)
-    verify_rma_env_factors(env, env_ids, max_envs, prefix)
-
-
-def print_rma_env_factors(
-    env: "ManagerBasedRLEnv",
-    env_ids: torch.Tensor | None,
-    max_envs: int,
-    prefix: str,
-) -> None:
-    """Periodic debug printer for the privileged e_t buffer.
-
-    Intended to be used with an IsaacLab EventTerm in `mode="interval"`.
-    """
-
-    def _emit(msg: str) -> None:
-        """Emit to terminal stdout (and also to Isaac Sim log when available)."""
-
-        print(msg, flush=True)
-        try:
-            import omni.log  # type: ignore
-
-            omni.log.info(msg)
-        except Exception:
-            pass
-
-    et = getattr(env, "rma_env_factors_buf", None)
-    if et is None or not isinstance(et, torch.Tensor):
-        _emit(f"{prefix} e_t buffer not found yet (env.rma_env_factors_buf is missing).")
-        return
-
-    if env_ids is None:
-        env_ids = torch.arange(env.num_envs, device=env.device)
-    else:
-        env_ids = env_ids.to(device=env.device)
-
-    if env_ids.numel() == 0:
-        return
-
-    # Aggregate over the env_ids provided by the event manager.
-    et_sel = et[env_ids]
-    payload = et_sel[:, DEFAULT_ET_SPEC.payload_slice]
-    leg_strength = et_sel[:, DEFAULT_ET_SPEC.leg_strength_slice]
-    friction = et_sel[:, DEFAULT_ET_SPEC.friction_slice]
-
-    # A couple of env samples for quick sanity checking.
-    n_show = int(min(max_envs, env_ids.numel()))
-    env_ids_show = env_ids[:n_show].tolist()
-    samples_show = et_sel[:n_show].detach().cpu().numpy()
-
-    def _stats(x: torch.Tensor) -> tuple[float, float, float]:
-        return float(x.mean().item()), float(x.min().item()), float(x.max().item())
-
-    m_force, mi_force, ma_force = _stats(payload[:, 0])
-    m_ls, mi_ls, ma_ls = _stats(leg_strength)
-    m_mu, mi_mu, ma_mu = _stats(friction)
-
-    # Step counter (best-effort): print only every 100 steps.
-    step_val = (
-        getattr(env, "common_step_counter", None)
-        or getattr(env, "_step_count", None)
-        or getattr(env, "step_count", None)
-    )
-    step_int: int | None = None
-    try:
-        if isinstance(step_val, torch.Tensor):
-            step_int = int(step_val.item())
-        elif step_val is not None:
-            step_int = int(step_val)
-    except Exception:
-        step_int = None
-
-    if step_int is None:
-        step_int = int(getattr(env, "_rma_debug_step_counter", 0)) + 1
-        setattr(env, "_rma_debug_step_counter", step_int)
-
-    # Don't spam on step 0, and only print every 100 steps.
-    if step_int == 0 or (step_int % 100) != 0:
-        return
-
-    step_str = f" step={step_int}"
-
-    _emit(
-        f"{prefix}{step_str} e_t stats over {env_ids.numel()} envs | "
-        f"force(mean/min/max)={m_force:.3f}/{mi_force:.3f}/{ma_force:.3f} N | "
-        f"leg_strength={m_ls:.3f}/{mi_ls:.3f}/{ma_ls:.3f} | "
-        f"friction={m_mu:.3f}/{mi_mu:.3f}/{ma_mu:.3f}"
-    )
-    _emit(f"{prefix} sample env_ids={env_ids_show} e_t[:{n_show}]={samples_show}")
-
-
-def print_rma_env_factors_once(
-    env: "ManagerBasedRLEnv",
-    env_ids: torch.Tensor | None,
-    max_envs: int,
-    prefix: str,
-) -> None:
-    """Print e_t once (first time invoked), then stay silent.
-
-    Useful during early training when episodes are short, so interval-based prints may never fire.
-    """
-
-    if getattr(env, "_rma_debug_print_once_done", False):
-        return
-    setattr(env, "_rma_debug_print_once_done", True)
-    print_rma_env_factors(env, env_ids, max_envs, prefix)

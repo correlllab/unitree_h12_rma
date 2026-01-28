@@ -398,7 +398,7 @@ def main(
     encoder_cfg = EnvFactorEncoderCfg(in_dim=14, latent_dim=8, hidden_dims=(256, 128))
     encoder = EnvFactorEncoder(cfg=encoder_cfg)
 
-    decoder_cfg = EnvFactorDecoderCfg()
+    decoder_cfg = EnvFactorDecoderCfg(out_dim=14)
     decoder = EnvFactorDecoder(cfg=decoder_cfg)
 
     # Create joint trainer

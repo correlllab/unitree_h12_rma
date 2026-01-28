@@ -1,3 +1,5 @@
+# INCOMPLETE ~ Needs changes 
+
 # Unitree H12 Sim2Sim Project
 
 A complete simulation-to-simulation pipeline for training and deploying the Unitree H12 humanoid robot, bridging Isaac Lab for training with MuJoCo for deployment.
