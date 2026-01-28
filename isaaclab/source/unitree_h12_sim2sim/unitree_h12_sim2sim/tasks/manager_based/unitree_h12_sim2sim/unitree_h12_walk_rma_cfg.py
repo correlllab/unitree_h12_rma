@@ -33,117 +33,41 @@ from unitree_h12_sim2sim.rma_modules.env_factor_spec import DEFAULT_ET_SPEC
 
 
 RMA_Z_DIM = 8
+# e_t now only includes: force, leg_strength, friction (no terrain)
 RMA_ET_DIM = DEFAULT_ET_SPEC.dim
 
 
+
+# Reformulated for base policy and RMA encoder/decoder training (no terrain in e_t)
 @configclass
 class ObservationsRmaCfg(_BaseObservationsCfg):
-    """Observation specification extended with RMA extrinsics / env factors."""
+    """Observation specification for RMA: extrinsics (z_t) and reduced env factors (e_t: force, leg_strength, friction)."""
 
     @configclass
     class PolicyCfg(_BaseObservationsCfg.PolicyCfg):
-        """Observations for policy group."""
+        """Observations for policy group (base policy or RMA policy)."""
 
         # RMA latent (z_t) appended to the end of the policy observation.
-        # NOTE: For now the env provides a placeholder buffer (zeros) that can be populated later by the policy wrapper.
+        # For base policy training, this can be zeros or omitted; for RMA, populated by encoder.
         rma_extrinsics = ObsTerm(func=mdp.rma_extrinsics, params={"dim": RMA_Z_DIM})
 
         def __post_init__(self):
             super().__post_init__()
-            # keep the same behavior as base policy group
             self.concatenate_terms = True
 
     policy: PolicyCfg = PolicyCfg()
 
     @configclass
     class CriticCfg(_BaseObservationsCfg.CriticCfg):
-        """Observations for critic group."""
+        """Observations for critic group (privileged, for RMA phase-1 or logging)."""
 
-        # Privileged environment factors (e_t). This is not used by the actor in the default IsaacLab PPO wiring,
-        # but is useful to keep available for phase-1 training experiments/logging.
-        # Leg-only e_t (strength scaling is 12 dims for the 12 leg joints).
+        # Privileged environment factors (e_t): force, leg_strength, friction only.
         rma_env_factors = ObsTerm(func=mdp.rma_env_factors, params={"dim": RMA_ET_DIM})
 
         def __post_init__(self):
             super().__post_init__()
 
     critic: CriticCfg = CriticCfg()
-
-
-@configclass
-class EventRmaCfg(_BaseEventCfg):
-    """Events for RMA phase-1 training.
-
-    Adds an explicit reset-time sampler that fills `env.rma_env_factors_buf`.
-    """
-
-    # Disable the base task's startup randomizations for mass/friction so they don't desync from e_t.
-    # RMA handles these per-episode at reset via `rma_env_factors`.
-    physics_material = EventTerm(
-        func=mdp.randomize_rigid_body_material,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            "static_friction_range": (1.0, 1.0),
-            "dynamic_friction_range": (1.0, 1.0),
-            "restitution_range": (0.0, 0.0),
-            "num_buckets": 1,
-        },
-    )
-
-    add_base_mass = EventTerm(
-        func=mdp.randomize_rigid_body_mass,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="torso_link"),
-            "mass_distribution_params": (0.0, 0.0),
-            "operation": "add",
-        },
-    )
-
-    rma_env_factors = EventTerm(
-        func=mdp.sample_rma_env_factors,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="torso_link"),
-            "payload_force_range_n": (0.0, 50.0),
-            "leg_strength_range": (0.9, 1.1),
-            "apply_to_sim": True,
-        },
-    )
-
-    # Print once at the first reset (early training episodes can be <5s, so interval prints may not fire).
-    rma_debug_print_once = EventTerm(
-        func=mdp.print_rma_env_factors_once,
-        mode="reset",
-        params={
-            "max_envs": 2,
-            "prefix": "[RMA:e_t][once]",
-        },
-    )
-
-    # Verify that sampled values are applied in the simulator (best-effort readbacks), once.
-    rma_verify_apply_once = EventTerm(
-        func=mdp.verify_rma_env_factors_once,
-        mode="reset",
-        params={
-            "max_envs": 2,
-            "prefix": "[RMA:verify]",
-        },
-    )
-
-    rma_debug_print = EventTerm(
-        func=mdp.print_rma_env_factors,
-        mode="interval",
-        # Run every sim step; the function itself gates printing to once every 100 steps.
-        interval_range_s=(0.02, 0.02),
-        params={
-            "max_envs": 2,
-            "prefix": "[RMA:e_t]",
-        },
-    )
-
-
 
 @configclass
 class CurriculumRmaCfg:
@@ -162,7 +86,6 @@ class H12LocomotionFullBodyRmaEnvCfg(H12LocomotionFullBodyEnvCfg):
     """Configuration for H12 full-body locomotion task with RMA observation extensions."""
 
     observations: ObservationsRmaCfg = ObservationsRmaCfg()
-    events: EventRmaCfg = EventRmaCfg()
     curriculum: CurriculumRmaCfg = CurriculumRmaCfg()
 
     def __post_init__(self) -> None:
