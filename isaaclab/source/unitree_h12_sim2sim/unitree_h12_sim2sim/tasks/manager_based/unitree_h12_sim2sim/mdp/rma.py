@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Sequence
 
 import torch
 
-from unitree_h12_sim2sim.rma_modules.env_factor_spec import DEFAULT_ET_SPEC, LEG_JOINT_NAMES
+from rma_modules.env_factor_spec import DEFAULT_ET_SPEC, LEG_JOINT_NAMES
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -80,7 +80,6 @@ def _read_ground_friction(env: ManagerBasedRLEnv) -> float | None:
         pass
     
     return None
-
 
 
 
@@ -251,7 +250,7 @@ def sample_rma_env_factors(
 
     et = _ensure_buffer(env, "rma_env_factors_buf", DEFAULT_ET_SPEC.dim)
 
-    # --- sample active factors
+    # --- sample active factors (e_t = force + leg_strength + friction, 14D per RmaEtSpec)
     payload_force = sample_payload_force(env_ids, device, payload_force_range_n)
     leg_strength = sample_leg_strength_scale(env_ids, device, DEFAULT_ET_SPEC.leg_strength_dim, leg_strength_range)
 

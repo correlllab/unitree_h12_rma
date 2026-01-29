@@ -5,18 +5,60 @@
 
 import argparse
 import os
+import sys
 import torch
+import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
 from datetime import datetime
 
-from unitree_h12_sim2sim.rma_modules import (
+# Ensure rma_modules is importable when running as a script
+script_root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(script_root))
+
+
+from rma_modules import (
     EnvFactorEncoder,
     EnvFactorEncoderCfg,
     EnvFactorDecoder,
     EnvFactorDecoderCfg,
 )
 
+
+class EnvFactorNormalizer:
+    """Normalizes environment factors to [0, 1] range (force, leg_strength, friction only, 14 dims)."""
+
+    def __init__(self, device: str = "cpu"):
+        self.device = device
+        self.mins = torch.tensor(
+            [
+                0.0,  # payload force
+                *([0.9] * 12),  # leg strengths
+                0.0,  # friction
+            ],
+            device=device,
+            dtype=torch.float32,
+        )
+        self.maxs = torch.tensor(
+            [
+                50.0,  # payload force
+                *([1.1] * 12),  # leg strengths
+                1.0,  # friction
+            ],
+            device=device,
+            dtype=torch.float32,
+        )
+        self.ranges = self.maxs - self.mins
+
+    def normalize(self, e_t: torch.Tensor) -> torch.Tensor:
+        mins = self.mins.to(e_t.device)
+        ranges = self.ranges.to(e_t.device)
+        return (e_t - mins) / (ranges + 1e-8)
+
+    def denormalize(self, e_t_normalized: torch.Tensor) -> torch.Tensor:
+        ranges = self.ranges.to(e_t_normalized.device)
+        mins = self.mins.to(e_t_normalized.device)
+        return e_t_normalized * ranges + mins
 
 def find_latest_checkpoint(log_dir: str, model_type: str = "encoder") -> str:
     """Find the latest checkpoint of a specific type.
@@ -69,16 +111,16 @@ def load_models(
     
     # Load encoder
     encoder_ckpt = torch.load(encoder_path, map_location=device)
-    encoder_cfg = EnvFactorEncoderCfg(in_dim=17, latent_dim=8, hidden_dims=(256, 128))
+    encoder_cfg = EnvFactorEncoderCfg(in_dim=14, latent_dim=8, hidden_dims=(256, 128))
     encoder = EnvFactorEncoder(cfg=encoder_cfg).to(device)
     encoder.load_state_dict(encoder_ckpt["model_state_dict"])
     encoder.eval()
     
     # Load decoder
     decoder_ckpt = torch.load(decoder_path, map_location=device)
-    decoder_cfg = EnvFactorDecoderCfg()
+    decoder_cfg = EnvFactorDecoderCfg(in_dim=8, out_dim=14, use_output_scaling=False)
     decoder = EnvFactorDecoder(cfg=decoder_cfg).to(device)
-    decoder.load_state_dict(decoder_ckpt["model_state_dict"])
+    decoder.load_state_dict(decoder_ckpt["model_state_dict"], strict=False)
     decoder.eval()
     
     return encoder, decoder, encoder_cfg, decoder_cfg
@@ -102,13 +144,17 @@ def compute_reconstruction_stats(
         Dictionary with reconstruction statistics
     """
     e_t = e_t.to(device)
+    normalizer = EnvFactorNormalizer(device=device)
     
     with torch.no_grad():
-        # Encode
-        z_t = encoder(e_t)
-        
-        # Decode
-        e_t_recon = decoder(z_t, apply_scaling=True)
+        # Encode normalized e_t
+        e_t_norm = normalizer.normalize(e_t)
+        z_t = encoder(e_t_norm)
+
+        # Decode back to normalized space
+        e_t_recon_norm = decoder(z_t, apply_scaling=False)
+        # Denormalize for error reporting in physical units
+        e_t_recon = normalizer.denormalize(e_t_recon_norm)
     
     # Compute errors
     mse = torch.nn.functional.mse_loss(e_t, e_t_recon, reduction="none")
@@ -119,9 +165,6 @@ def compute_reconstruction_stats(
         "Payload Force (N)",
         *[f"Leg Strength {i}" for i in range(12)],
         "Friction",
-        "Terrain Amplitude (m)",
-        "Terrain Lengthscale (m)",
-        "Terrain Noise Step",
     ]
     
     stats = {
@@ -142,7 +185,42 @@ def compute_reconstruction_stats(
             "std": e_t[:, i].std().item(),
         }
     
+    stats["e_t"] = e_t.detach().cpu()
+    stats["e_t_recon"] = e_t_recon.detach().cpu()
+    stats["factor_names"] = factor_names
     return stats
+
+
+def plot_gt_vs_estimated(
+    e_t: torch.Tensor,
+    e_t_recon: torch.Tensor,
+    factor_names: list[str],
+    output_path: Path,
+    max_points: int = 200,
+) -> None:
+    """Plot ground-truth vs estimated e_t components."""
+    num_factors = e_t.shape[1]
+    num_points = min(max_points, e_t.shape[0])
+    x = np.arange(num_points)
+
+    fig, axes = plt.subplots(num_factors, 1, figsize=(10, 2.2 * num_factors), sharex=True)
+    if num_factors == 1:
+        axes = [axes]
+
+    for i in range(num_factors):
+        ax = axes[i]
+        ax.plot(x, e_t[:num_points, i].numpy(), label="gt", linewidth=1.5)
+        ax.plot(x, e_t_recon[:num_points, i].numpy(), label="est", linewidth=1.0, alpha=0.8)
+        ax.set_title(factor_names[i])
+        ax.grid(True, alpha=0.3)
+        if i == 0:
+            ax.legend(loc="upper right", fontsize=8)
+
+    axes[-1].set_xlabel("sample index")
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
 
 
 def main():
@@ -175,7 +253,7 @@ def main():
     if not encoder_path or not decoder_path:
         # Try to find automatically
         print("[INFO] Searching for latest training run...")
-        log_root = Path("/home/niraj/isaac_projects/unitree_h12_rma/wbc_agile_utils/logs/rsl_rl/unitree_h12_walk_rma")
+        log_root = Path("/home/niraj/isaac_projects/unitree_h12_rma/rma/logs/rsl_rl/unitree_h12_walk_rma")
         if log_root.exists():
             runs = sorted(log_root.glob("2026-*"))
             if runs:
@@ -205,19 +283,16 @@ def main():
         return
     
     print(f"[INFO] Encoder: in_dim={encoder_cfg.in_dim}, latent_dim={encoder_cfg.latent_dim}")
-    print(f"[INFO] Decoder: output_dim=17")
+    print(f"[INFO] Decoder: output_dim=14")
     
     # Generate test samples
     print(f"\n[INFO] Generating {args.num_samples} test samples...")
-    e_t_test = torch.randn(args.num_samples, 17)
+    e_t_test = torch.randn(args.num_samples, 14)
     
     # Scale to realistic ranges
-    e_t_test[:, 0] = torch.clamp(e_t_test[:, 0] * 12.5 + 25, 0, 50)      # Force: 0-50 N
+    e_t_test[:, 0] = torch.clamp(e_t_test[:, 0] * 12.5 + 25, 0, 50)  # Force: 0-50 N
     e_t_test[:, 1:13] = torch.clamp(e_t_test[:, 1:13] * 0.05 + 1.0, 0.9, 1.1)  # Leg strength: 0.9-1.1
-    e_t_test[:, 13] = torch.clamp(e_t_test[:, 13] * 0.3 + 0.5, 0, 1)     # Friction: 0-1
-    e_t_test[:, 14] = torch.clamp(e_t_test[:, 14] * 0.5e-3, 0, 2e-3)     # Terrain amplitude
-    e_t_test[:, 15] = torch.clamp(e_t_test[:, 15] * 0.05 + 0.1, 0, 0.2)  # Terrain lengthscale
-    e_t_test[:, 16] = torch.clamp(e_t_test[:, 16] * 0.025 + 0.05, 0, 0.1)  # Terrain noise step
+    e_t_test[:, 13] = torch.clamp(e_t_test[:, 13] * 0.3 + 0.5, 0, 1)  # Friction: 0-1
     
     # Compute reconstruction statistics
     print("\n[INFO] Computing reconstruction statistics...")
@@ -225,6 +300,17 @@ def main():
     
     # Print results
     print("\n" + "="*100)
+
+    # Plot GT vs estimated components
+    output_dir = Path(args.log_dir) / "decoder_eval" if args.log_dir else Path("rma/results")
+    plot_path = output_dir / f"gt_vs_estimated_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.png"
+    plot_gt_vs_estimated(
+        stats["e_t"],
+        stats["e_t_recon"],
+        stats["factor_names"],
+        plot_path,
+    )
+    print(f"\n[INFO] Saved GT vs estimated plot to: {plot_path}")
     print("DECODER RECONSTRUCTION ACCURACY REPORT")
     print("="*100)
     print(f"Test samples: {args.num_samples}")

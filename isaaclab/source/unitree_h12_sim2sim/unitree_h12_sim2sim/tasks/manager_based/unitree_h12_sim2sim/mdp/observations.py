@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 from typing import TYPE_CHECKING
 
-from unitree_h12_sim2sim.rma_modules.env_factor_spec import DEFAULT_ET_SPEC
+from rma_modules.env_factor_spec import DEFAULT_ET_SPEC
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv

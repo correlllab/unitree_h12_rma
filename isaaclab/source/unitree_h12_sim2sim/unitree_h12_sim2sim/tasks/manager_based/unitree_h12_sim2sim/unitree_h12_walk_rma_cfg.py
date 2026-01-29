@@ -29,7 +29,7 @@ from .unitree_h12_sim2sim_walk_cfg import (
     ObservationsCfg as _BaseObservationsCfg,
 )
 
-from unitree_h12_sim2sim.rma_modules.env_factor_spec import DEFAULT_ET_SPEC
+from rma_modules.env_factor_spec import DEFAULT_ET_SPEC
 
 
 RMA_Z_DIM = 8
@@ -95,7 +95,7 @@ class H12LocomotionFullBodyRmaEnvCfg(H12LocomotionFullBodyEnvCfg):
         sample_rma_env_factors = EventTerm(
             func=mdp.sample_rma_env_factors,
             mode="reset",  # call at every environment reset
-            params={},
+            params={"asset_cfg": SceneEntityCfg("robot")},
         )
 
     events: EventsCfg = EventsCfg()

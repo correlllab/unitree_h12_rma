@@ -8,16 +8,20 @@
 # flake8: noqa
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 
-# Add isaaclab scripts directory to path for cli_args import
-sys.path.insert(0, str(Path(__file__).parent.parent / "isaaclab" / "scripts" / "rsl_rl"))
+# Add IsaacLab + local extensions to PYTHONPATH
+workspace_root = Path(__file__).resolve().parents[1]
+isaaclab_root = Path("/home/niraj/isaac_projects/IsaacLab")
+sys.path.insert(0, str(isaaclab_root / "source"))
+sys.path.insert(0, str(workspace_root / "isaaclab" / "source"))
+sys.path.insert(0, str(workspace_root / "rma"))
+sys.path.insert(0, str(workspace_root / "isaaclab" / "scripts" / "rsl_rl"))
 
-# Ensure environment registration is executed before training
-import isaaclab.source.unitree_h12_sim2sim.unitree_h12_sim2sim.tasks.manager_based.unitree_h12_sim2sim  # noqa: F401
-
+# NOTE: Do not import any Isaac Sim/Omni modules before SimulationApp starts.
 from isaaclab.app import AppLauncher
 
 # local imports
@@ -52,6 +56,12 @@ parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy 
 parser.add_argument("--encoder_weight", type=float, default=0.01, help="Weight for encoder loss in joint loss.")
 parser.add_argument("--decoder_weight", type=float, default=0.1, help="Weight for decoder loss in joint loss.")
 parser.add_argument("--checkpoint_interval", type=int, default=100, help="Save encoder/decoder checkpoints every N iterations.")
+parser.add_argument(
+    "--use_existing_kit_app",
+    action="store_true",
+    default=False,
+    help="Skip AppLauncher (use when running via `isaacsim --exec`).",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -65,9 +75,29 @@ if args_cli.video:
 # clear out sys.argv for Hydra
 sys.argv = [sys.argv[0]] + hydra_args
 
-# launch omniverse app
-app_launcher = AppLauncher(args_cli)
-simulation_app = app_launcher.app
+# launch omniverse app (or reuse existing Kit app)
+simulation_app = None
+existing_kit_app = False
+try:
+    import omni.kit_app  # type: ignore
+
+    existing_kit_app = omni.kit_app.get_app() is not None
+except Exception:
+    existing_kit_app = False
+
+use_existing_kit_app = (
+    args_cli.use_existing_kit_app
+    or existing_kit_app
+    or os.environ.get("OMNI_APP_NAME")
+    or os.environ.get("ISAACSIM_APP")
+    or os.environ.get("OMNI_KIT_APP")
+)
+if not use_existing_kit_app:
+    app_launcher = AppLauncher(args_cli)
+    simulation_app = app_launcher.app
+
+# Ensure environment registration is executed after SimulationApp starts
+import unitree_h12_sim2sim.tasks.manager_based.unitree_h12_sim2sim  # noqa: F401
 
 """Rest everything follows."""
 
@@ -76,6 +106,7 @@ import os
 import torch
 from datetime import datetime
 from pathlib import Path
+import csv
 
 from rsl_rl.runners import OnPolicyRunner
 
@@ -129,11 +160,55 @@ class EnvFactorNormalizer:
         ], device=device, dtype=torch.float32)
         self.ranges = self.maxs - self.mins
     def normalize(self, e_t: torch.Tensor) -> torch.Tensor:
-        return (e_t - self.mins) / (self.ranges + 1e-8)
+        mins = self.mins.to(e_t.device)
+        ranges = self.ranges.to(e_t.device)
+        return (e_t - mins) / (ranges + 1e-8)
     def denormalize(self, e_t_normalized: torch.Tensor) -> torch.Tensor:
         ranges = self.ranges.to(e_t_normalized.device)
         mins = self.mins.to(e_t_normalized.device)
         return e_t_normalized * ranges + mins
+
+
+class RmaEncoderObsWrapper(gym.Wrapper):
+    """Phase-1 RMA: before each step, set rma_extrinsics_buf = encoder(normalize(e_t)) so the policy receives z_t."""
+
+    RMA_Z_DIM = 8
+    RMA_ET_DIM = 14
+
+    def __init__(self, env: gym.Env, encoder: "EnvFactorEncoder", normalizer: EnvFactorNormalizer, device: torch.device):
+        super().__init__(env)
+        self._encoder = encoder
+        self._normalizer = normalizer
+        self._device = device
+
+    def _get_unwrapped(self):
+        env = self.env
+        while hasattr(env, "env"):
+            env = env.env
+        return env
+
+    def step(self, action):
+        unwrapped = self._get_unwrapped()
+        e_t_buf = getattr(unwrapped, "rma_env_factors_buf", None)
+        if e_t_buf is not None and e_t_buf.shape[0] > 0 and e_t_buf.shape[-1] >= self.RMA_ET_DIM:
+            try:
+                encoder_device = next(self._encoder.parameters()).device
+            except StopIteration:
+                encoder_device = self._device
+            e_t = e_t_buf[:, : self.RMA_ET_DIM].to(encoder_device)
+            with torch.no_grad():
+                e_t_norm = self._normalizer.normalize(e_t)
+                z_t = self._encoder(e_t_norm.to(encoder_device))
+            z_buf = getattr(unwrapped, "rma_extrinsics_buf", None)
+            if z_buf is None or z_buf.shape != (unwrapped.num_envs, self.RMA_Z_DIM):
+                setattr(
+                    unwrapped,
+                    "rma_extrinsics_buf",
+                    torch.zeros((unwrapped.num_envs, self.RMA_Z_DIM), device=unwrapped.device, dtype=torch.float),
+                )
+                z_buf = unwrapped.rma_extrinsics_buf
+            z_buf.copy_(z_t.to(unwrapped.device))
+        return self.env.step(action)
 
 
 class RMATrainerJoint:
@@ -186,38 +261,29 @@ class RMATrainerJoint:
         # Logging
         self.encoder_losses = []
         self.decoder_losses = []
+        self.loss_log_path = Path(log_dir) / "encoder_decoder_losses.csv"
+        if not self.loss_log_path.exists():
+            with self.loss_log_path.open("w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["policy_iter", "encoder_loss_avg", "decoder_loss_avg"])
     
+    def _get_unwrapped_env(self):
+        """Return the innermost Isaac Lab env that has rma_env_factors_buf / rma_extrinsics_buf."""
+        env = self.runner.env
+        while hasattr(env, "env"):
+            env = env.env
+        return env
+
     def extract_env_factors(self) -> torch.Tensor:
         """Extract environment factors from environment.
         Returns:
             Tensor of shape (num_envs, 14), or None if unable to extract.
         """
-        env = self.runner.env
-        env_to_check = env
-        
-        # Unwrap RslRlVecEnvWrapper
-        if hasattr(env_to_check, "env"):
-            env_to_check = env_to_check.env
-        
-        # Unwrap gym wrappers
-        while hasattr(env_to_check, "env"):
-            env_to_check = env_to_check.env
-        
-        # Check for rma_env_factors in scene
-        if hasattr(env_to_check, "scene") and hasattr(env_to_check.scene, "rma_env_factors"):
-            e_t = env_to_check.scene.rma_env_factors
-            if isinstance(e_t, torch.Tensor) and e_t.shape[0] > 0:
-                return e_t.clone().to(self.device)
-        
-        # Check attributes for rma_env_factors
-        for attr_name in ["state", "_state", "unwrapped"]:
-            if hasattr(env_to_check, attr_name):
-                attr = getattr(env_to_check, attr_name)
-                if hasattr(attr, "rma_env_factors"):
-                    e_t = attr.rma_env_factors
-                    if isinstance(e_t, torch.Tensor) and e_t.shape[0] > 0:
-                        return e_t.clone().to(self.device)
-        
+        env = self._get_unwrapped_env()
+        # Isaac Lab stores e_t in env.rma_env_factors_buf (populated by sample_rma_env_factors at reset)
+        e_t = getattr(env, "rma_env_factors_buf", None)
+        if isinstance(e_t, torch.Tensor) and e_t.shape[0] > 0 and e_t.shape[-1] >= 14:
+            return e_t[:, :14].clone().to(self.device)
         return None
     
     def train_step(self, e_t: torch.Tensor):
@@ -307,6 +373,9 @@ class RMATrainerJoint:
             f"Encoder Loss: {avg_encoder_loss:.6f} | "
             f"Decoder Loss: {avg_decoder_loss:.6f}"
         )
+        with self.loss_log_path.open("a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([policy_iter, avg_encoder_loss, avg_decoder_loss])
 
 
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
@@ -360,21 +429,14 @@ def main(
     if agent_cfg.resume:
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
-    # # wrap for video recording
-    # if args_cli.video:
-    #     if args_cli.video_interval_steps and args_cli.video_interval_steps > 0:
-    #         video_interval_steps = args_cli.video_interval_steps
-    #     else:
-    #         video_interval_steps = args_cli.video_interval_iter * agent_cfg.num_steps_per_env
-    #     video_kwargs = {
-    #         "video_folder": os.path.join(log_dir, "videos", "train"),
-    #         "step_trigger": lambda step: step % video_interval_steps == 0,
-    #         "video_length": args_cli.video_length,
-    #         "disable_logger": True,
-    #     }
-    #     print("[INFO] Recording videos during training.")
-    #     print_dict(video_kwargs, nesting=4)
-    #     env = gym.wrappers.RecordVideo(env, **video_kwargs)
+    # Phase-1 RMA: encoder produces z_t from e_t; we feed z_t into policy obs via rma_extrinsics_buf.
+    # Create encoder/decoder and wrapper *before* RSL-RL so each step populates z_t before policy sees obs.
+    encoder_cfg = EnvFactorEncoderCfg(in_dim=14, latent_dim=8, hidden_dims=(256, 128))
+    encoder = EnvFactorEncoder(cfg=encoder_cfg)
+    decoder_cfg = EnvFactorDecoderCfg(in_dim=8, out_dim=14, use_output_scaling=False)
+    decoder = EnvFactorDecoder(cfg=decoder_cfg)
+    normalizer = EnvFactorNormalizer(device=agent_cfg.device)
+    env = RmaEncoderObsWrapper(env, encoder, normalizer, agent_cfg.device)
 
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
@@ -398,7 +460,7 @@ def main(
     encoder_cfg = EnvFactorEncoderCfg(in_dim=14, latent_dim=8, hidden_dims=(256, 128))
     encoder = EnvFactorEncoder(cfg=encoder_cfg)
 
-    decoder_cfg = EnvFactorDecoderCfg(out_dim=14)
+    decoder_cfg = EnvFactorDecoderCfg()
     decoder = EnvFactorDecoder(cfg=decoder_cfg)
 
     # Create joint trainer
@@ -417,29 +479,37 @@ def main(
     print(f"[INFO] Policy iterations: {agent_cfg.max_iterations}")
     print(f"[INFO] Encoder/decoder trained alongside policy each iteration\n")
 
-    # Joint training loop
-    for policy_iter in range(agent_cfg.max_iterations):
-        # Policy learning step
-        runner.learn(num_learning_iterations=1)
-        
+    # Hook encoder/decoder training into the policy update so we can call runner.learn once.
+    aux_state = {"iter": 0}
+    orig_update = runner.alg.update
+
+    def update_with_aux(*args, **kwargs):
+        loss_dict = orig_update(*args, **kwargs)
+        aux_state["iter"] += 1
+
         # Extract environment factors
         e_t = trainer.extract_env_factors()
-        
-        # Train encoder/decoder on current environment factors
         if e_t is not None:
             trainer.train_step(e_t)
-        
+
         # Log losses
-        if (policy_iter + 1) % 10 == 0:
-            trainer.log_losses(policy_iter + 1)
-        
+        if aux_state["iter"] % 10 == 0:
+            trainer.log_losses(aux_state["iter"])
+
         # Save checkpoints
-        if (policy_iter + 1) % args_cli.checkpoint_interval == 0:
-            trainer.save_checkpoint(policy_iter + 1)
-    
+        if aux_state["iter"] % args_cli.checkpoint_interval == 0:
+            trainer.save_checkpoint(aux_state["iter"])
+
+        return loss_dict
+
+    runner.alg.update = update_with_aux
+
+    # Run policy training in a single call for proper iteration display
+    runner.learn(num_learning_iterations=agent_cfg.max_iterations)
+
     # Final checkpoint
     trainer.save_checkpoint(agent_cfg.max_iterations)
-    
+
     print("\n[INFO] Training completed!")
 
     # close the simulator
@@ -448,4 +518,5 @@ def main(
 
 if __name__ == "__main__":
     main()
-    simulation_app.close()
+    if simulation_app is not None:
+        simulation_app.close()

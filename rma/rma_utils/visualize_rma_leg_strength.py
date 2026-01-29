@@ -61,7 +61,7 @@ from isaaclab_tasks.utils import parse_env_cfg
 
 import unitree_h12_sim2sim  # noqa: F401
 
-from unitree_h12_sim2sim.rma_modules.env_factor_spec import DEFAULT_ET_SPEC, LEG_JOINT_NAMES
+from rma_modules.env_factor_spec import DEFAULT_ET_SPEC, LEG_JOINT_NAMES
 from unitree_h12_sim2sim.tasks.manager_based.unitree_h12_sim2sim.mdp import rma as rma_mdp
 
 

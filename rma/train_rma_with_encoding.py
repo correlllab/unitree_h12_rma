@@ -88,7 +88,7 @@ import agile.isaaclab_extras.monkey_patches
 # PLACEHOLDER: Extension template (do not remove this comment)
 import unitree_h12_sim2sim  # noqa: F401
 
-from unitree_h12_sim2sim.rma_modules import (  # isort: skip
+from rma_modules import (  # isort: skip
     EnvFactorEncoder,
     EnvFactorEncoderCfg,
     EnvFactorDecoder,

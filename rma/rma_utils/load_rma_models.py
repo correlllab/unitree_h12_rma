@@ -8,7 +8,7 @@ import os
 import torch
 from pathlib import Path
 
-from unitree_h12_sim2sim.rma_modules import (
+from rma_modules import (
     EnvFactorEncoder,
     EnvFactorEncoderCfg,
     EnvFactorDecoder,

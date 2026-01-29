@@ -36,7 +36,7 @@ def main(args):
         unitree_h12_walk_rma_cfg,
     )
     from unitree_h12_sim2sim.tasks.manager_based.unitree_h12_sim2sim.mdp.rma import verify_rma_env_factors_once
-    from unitree_h12_sim2sim.rma_modules.env_factor_spec import DEFAULT_ET_SPEC, LEG_JOINT_NAMES
+    from rma_modules.env_factor_spec import DEFAULT_ET_SPEC, LEG_JOINT_NAMES
     
     # Create environment
     env_cfg = unitree_h12_walk_rma_cfg.H12LocomotionFullBodyRmaEnvCfg()
