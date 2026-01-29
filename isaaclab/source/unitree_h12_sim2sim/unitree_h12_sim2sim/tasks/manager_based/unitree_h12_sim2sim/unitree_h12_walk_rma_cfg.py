@@ -88,6 +88,18 @@ class H12LocomotionFullBodyRmaEnvCfg(H12LocomotionFullBodyEnvCfg):
     observations: ObservationsRmaCfg = ObservationsRmaCfg()
     curriculum: CurriculumRmaCfg = CurriculumRmaCfg()
 
+    # Add EventTerm to sample rma_env_factors at reset
+    @configclass
+    class EventsCfg(_BaseEventCfg):
+        """Events for RMA: sample rma_env_factors at reset."""
+        sample_rma_env_factors = EventTerm(
+            func=mdp.sample_rma_env_factors,
+            mode="reset",  # call at every environment reset
+            params={},
+        )
+
+    events: EventsCfg = EventsCfg()
+
     def __post_init__(self) -> None:
         super().__post_init__()
         # Ensure terrain generator curriculum is enabled for RMA training.
