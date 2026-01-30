@@ -232,6 +232,12 @@ def main():
     parser.add_argument("--device", type=str, default="cuda", help="Device (cuda or cpu)")
     parser.add_argument("--num-samples", type=int, default=1024, help="Number of test samples")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument(
+        "--fixed-friction",
+        type=float,
+        default=None,
+        help="If set, use a constant friction value for all test samples.",
+    )
     
     args = parser.parse_args()
     
@@ -292,7 +298,15 @@ def main():
     # Scale to realistic ranges
     e_t_test[:, 0] = torch.clamp(e_t_test[:, 0] * 12.5 + 25, 0, 50)  # Force: 0-50 N
     e_t_test[:, 1:13] = torch.clamp(e_t_test[:, 1:13] * 0.05 + 1.0, 0.9, 1.1)  # Leg strength: 0.9-1.1
-    e_t_test[:, 13] = torch.clamp(e_t_test[:, 13] * 0.25 + 0.75, 0.5, 1.0)  # Friction: 0.5-1.0
+    if args.fixed_friction is not None:
+        e_t_test[:, 13] = torch.clamp(
+            torch.full((args.num_samples,), float(args.fixed_friction)),
+            0.0,
+            1.0,
+        )
+    else:
+        e_t_test[:, 13] = torch.clamp(e_t_test[:, 13] * 0.25 + 0.75, 0.5, 1.0)
+        # Friction: 0.5-1.0
     
     # Compute reconstruction statistics
     print("\n[INFO] Computing reconstruction statistics...")

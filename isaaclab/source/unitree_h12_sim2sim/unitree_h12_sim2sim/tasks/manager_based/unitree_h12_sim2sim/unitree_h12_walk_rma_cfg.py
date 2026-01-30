@@ -63,6 +63,14 @@ class ObservationsRmaCfg(_BaseObservationsCfg):
 
         # Privileged environment factors (e_t): force, leg_strength, friction only.
         rma_env_factors = ObsTerm(func=mdp.rma_env_factors, params={"dim": RMA_ET_DIM})
+        # Slip-related cue: tangential foot velocity during contact (privileged).
+        feet_slip_velocity = ObsTerm(
+            func=mdp.feet_slip_velocity,
+            params={
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ankle_roll.*"),
+                "asset_cfg": SceneEntityCfg("robot", body_names=".*ankle_roll.*"),
+            },
+        )
 
         def __post_init__(self):
             super().__post_init__()

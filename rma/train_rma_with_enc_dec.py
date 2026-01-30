@@ -55,6 +55,12 @@ parser.add_argument("--seed", type=int, default=None, help="Seed used for the en
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument("--encoder_weight", type=float, default=0.01, help="Weight for encoder loss in joint loss.")
 parser.add_argument("--decoder_weight", type=float, default=0.1, help="Weight for decoder loss in joint loss.")
+parser.add_argument(
+    "--friction_loss_weight",
+    type=float,
+    default=10.0,
+    help="Weight multiplier for friction reconstruction loss (dimension 13).",
+)
 parser.add_argument("--checkpoint_interval", type=int, default=100, help="Save encoder/decoder checkpoints every N iterations.")
 parser.add_argument(
     "--use_existing_kit_app",
@@ -334,14 +340,8 @@ class RMATrainerJoint:
         weights[:, 13] = self.friction_loss_weight
         decoder_loss = ((e_t_recon - e_t_normalized) ** 2 * weights).mean()
         
-        # Encoder auxiliary loss (optional: encourage informative latent)
-        encoder_loss = torch.nn.functional.mse_loss(z_t, torch.zeros_like(z_t)) * 0.001
-        
-        # Total auxiliary loss
-        total_aux_loss = (
-            self.encoder_weight * encoder_loss + 
-            self.decoder_weight * decoder_loss
-        )
+        # Total auxiliary loss (encoder aux loss removed)
+        total_aux_loss = self.decoder_weight * decoder_loss
         
         # Backprop encoder/decoder
         self.encoder_optimizer.zero_grad()
@@ -352,8 +352,8 @@ class RMATrainerJoint:
         self.encoder_optimizer.step()
         self.decoder_optimizer.step()
         
-        # Track losses
-        self.encoder_losses.append(encoder_loss.item())
+        # Track losses (encoder loss is zero when aux loss is disabled)
+        self.encoder_losses.append(0.0)
         self.decoder_losses.append(decoder_loss.item())
     
     def save_checkpoint(self, iteration: int):
@@ -503,13 +503,6 @@ def main(
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         runner.load(resume_path, load_optimizer=agent_cfg.load_optimizer)
 
-    # Create encoder and decoder
-    encoder_cfg = EnvFactorEncoderCfg(in_dim=14, latent_dim=8, hidden_dims=(256, 128))
-    encoder = EnvFactorEncoder(cfg=encoder_cfg)
-
-    decoder_cfg = EnvFactorDecoderCfg()
-    decoder = EnvFactorDecoder(cfg=decoder_cfg)
-
     # Create joint trainer
     trainer = RMATrainerJoint(
         runner=runner,
@@ -519,6 +512,7 @@ def main(
         device=agent_cfg.device,
         encoder_weight=args_cli.encoder_weight,
         decoder_weight=args_cli.decoder_weight,
+        friction_loss_weight=args_cli.friction_loss_weight,
         checkpoint_interval=args_cli.checkpoint_interval,
     )
 

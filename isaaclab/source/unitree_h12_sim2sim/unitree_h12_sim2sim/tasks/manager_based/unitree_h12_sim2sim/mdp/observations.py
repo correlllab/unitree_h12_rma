@@ -3,10 +3,17 @@ from __future__ import annotations
 import torch
 from typing import TYPE_CHECKING
 
+from isaaclab.assets import Articulation
+from isaaclab.managers import SceneEntityCfg
+from isaaclab.sensors import ContactSensor
+
 from rma_modules.env_factor_spec import DEFAULT_ET_SPEC
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
+    from isaaclab.managers import SceneEntityCfg
+    from isaaclab.sensors import ContactSensor
+    from isaaclab.assets import Articulation
 
 
 def gait_phase(env: ManagerBasedRLEnv, period: float) -> torch.Tensor:
@@ -60,3 +67,24 @@ def rma_extrinsics(env: ManagerBasedRLEnv, dim: int = 8) -> torch.Tensor:
     """
 
     return _get_or_create_env_buffer(env, "rma_extrinsics_buf", dim)
+
+
+def feet_slip_velocity(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: "SceneEntityCfg",
+    asset_cfg: "SceneEntityCfg",
+    contact_threshold: float = 1.0,
+) -> torch.Tensor:
+    """Tangential foot velocity during contact (slip cue).
+
+    Returns per-foot tangential speed (xy) masked by contact.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = (
+        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0]
+        > contact_threshold
+    )
+    asset: Articulation = env.scene[asset_cfg.name]
+    body_vel = asset.data.body_lin_vel_w[:, asset_cfg.body_ids, :2]
+    slip = body_vel.norm(dim=-1) * contacts
+    return slip
