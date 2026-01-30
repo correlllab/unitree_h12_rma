@@ -283,9 +283,18 @@ def sample_rma_env_factors(
     payload_force = sample_payload_force(env_ids, device, payload_force_range_n)
     leg_strength = sample_leg_strength_scale(env_ids, device, DEFAULT_ET_SPEC.leg_strength_dim, leg_strength_range)
 
-    # --- sample friction (observed by encoder)
-    mu_min, mu_max = float(friction_range[0]), float(friction_range[1])
-    friction = torch.empty((env_ids.numel(),), device=device).uniform_(mu_min, mu_max)
+    # --- sample friction globally (single value for all envs)
+    friction_val = getattr(env, "_rma_curriculum_friction", None)
+    if friction_val is None:
+        levels = getattr(env, "_rma_friction_levels", None)
+        if levels is not None and len(levels) > 0:
+            friction_val = float(levels[0].item())
+        else:
+            mu_min, mu_max = float(friction_range[0]), float(friction_range[1])
+            friction_val = torch.empty((1,), device=device).uniform_(mu_min, mu_max).item()
+    else:
+        friction_val = float(friction_val)
+    friction = torch.full((env_ids.numel(),), friction_val, device=device)
 
     # --- pack e_t buffer (14D: payload, leg_strength, friction)
     et_env = et[env_ids]
@@ -302,8 +311,8 @@ def sample_rma_env_factors(
     if apply_to_sim:
         _apply_downward_force(env, asset_cfg, env_ids, payload_force)
         _set_leg_effort_limits(env, asset_cfg, env_ids, leg_strength, LEG_JOINT_NAMES)
-        # Terrain friction is global; apply the mean sampled value
-        _apply_ground_friction(env, float(friction.mean().item()))
+        # Terrain friction is global; apply the sampled value
+        _apply_ground_friction(env, float(friction_val))
 
     # Store for debugging
     env.rma_payload_force_n = payload_force

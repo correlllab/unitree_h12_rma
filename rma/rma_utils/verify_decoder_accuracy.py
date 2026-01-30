@@ -80,7 +80,7 @@ def find_latest_checkpoint(log_dir: str, model_type: str = "encoder") -> str:
     if not checkpoints:
         # Try latest
         latest = checkpoint_dir / f"{model_type}_latest.pt"
-        if latest.exists():
+        if latest.exists(): 
             return str(latest)
         return None
     
@@ -292,7 +292,7 @@ def main():
     # Scale to realistic ranges
     e_t_test[:, 0] = torch.clamp(e_t_test[:, 0] * 12.5 + 25, 0, 50)  # Force: 0-50 N
     e_t_test[:, 1:13] = torch.clamp(e_t_test[:, 1:13] * 0.05 + 1.0, 0.9, 1.1)  # Leg strength: 0.9-1.1
-    e_t_test[:, 13] = torch.clamp(e_t_test[:, 13] * 0.3 + 0.5, 0, 1)  # Friction: 0-1
+    e_t_test[:, 13] = torch.clamp(e_t_test[:, 13] * 0.25 + 0.75, 0.5, 1.0)  # Friction: 0.5-1.0
     
     # Compute reconstruction statistics
     print("\n[INFO] Computing reconstruction statistics...")

@@ -132,7 +132,6 @@ from rma_modules import (
     EnvFactorDecoder,
     EnvFactorDecoderCfg,
 )
-from unitree_h12_sim2sim.tasks.manager_based.unitree_h12_sim2sim.mdp import rma as rma_mdp
 
 from agile.rl_env.rsl_rl import (  # isort: skip
     RslRlOnPolicyRunnerCfg,
@@ -224,7 +223,6 @@ class RMATrainerJoint:
         device: str,
         encoder_weight: float = 0.01,
         decoder_weight: float = 0.1,
-        friction_loss_weight: float = 5.0,
         checkpoint_interval: int = 100,
     ):
         """Initialize trainer.
@@ -248,7 +246,6 @@ class RMATrainerJoint:
         
         self.encoder_weight = encoder_weight
         self.decoder_weight = decoder_weight
-        self.friction_loss_weight = friction_loss_weight
         self.checkpoint_interval = checkpoint_interval
         
         # Optimizers
@@ -304,14 +301,6 @@ class RMATrainerJoint:
             except Exception:
                 return None
         return None
-
-    def _get_sim_friction_value(self) -> float | None:
-        """Best-effort read of terrain material friction (global)."""
-        env = self._get_unwrapped_env()
-        try:
-            return rma_mdp._read_ground_friction(env)
-        except Exception:
-            return None
     
     def train_step(self, e_t: torch.Tensor):
         """Perform one encoder/decoder training step.
@@ -328,11 +317,8 @@ class RMATrainerJoint:
         z_t = self.encoder(e_t_normalized)
         e_t_recon = self.decoder(z_t, apply_scaling=False)
         
-        # Decoder loss (weighted reconstruction in normalized space)
-        # Up-weight friction (index 13) to discourage mean-collapse.
-        weights = torch.ones((1, e_t_recon.shape[1]), device=e_t_recon.device, dtype=e_t_recon.dtype)
-        weights[:, 13] = self.friction_loss_weight
-        decoder_loss = ((e_t_recon - e_t_normalized) ** 2 * weights).mean()
+        # Decoder loss (reconstruction in normalized space)
+        decoder_loss = torch.nn.functional.mse_loss(e_t_recon, e_t_normalized)
         
         # Encoder auxiliary loss (optional: encourage informative latent)
         encoder_loss = torch.nn.functional.mse_loss(z_t, torch.zeros_like(z_t)) * 0.001
@@ -398,31 +384,21 @@ class RMATrainerJoint:
         avg_encoder_loss = sum(self.encoder_losses[-100:]) / min(100, len(self.encoder_losses))
         avg_decoder_loss = sum(self.decoder_losses[-100:]) / min(100, len(self.decoder_losses))
         
-        friction_val = self._get_friction_value()
-        sim_friction_val = self._get_sim_friction_value()
-        friction_msg = ""
-        if friction_val is not None:
-            friction_msg += f" | Friction: {friction_val:.3f}"
-        if sim_friction_val is not None:
-            friction_msg += f" | Sim friction: {sim_friction_val:.3f}"
-
         print(
             f"[Policy Iter {policy_iter:5d}] "
             f"Encoder Loss: {avg_encoder_loss:.6f} | "
             f"Decoder Loss: {avg_decoder_loss:.6f}"
-            f"{friction_msg}"
         )
         with self.loss_log_path.open("a", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([policy_iter, avg_encoder_loss, avg_decoder_loss])
 
         # TensorBoard logging for friction (if writer is enabled)
-        tb_writer = getattr(self.runner, "writer", None)
-        if tb_writer is not None:
-            if friction_val is not None:
+        friction_val = self._get_friction_value()
+        if friction_val is not None:
+            tb_writer = getattr(self.runner, "writer", None)
+            if tb_writer is not None:
                 tb_writer.add_scalar("rma/friction", friction_val, policy_iter)
-            if sim_friction_val is not None:
-                tb_writer.add_scalar("rma/friction_sim", sim_friction_val, policy_iter)
 
 
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")

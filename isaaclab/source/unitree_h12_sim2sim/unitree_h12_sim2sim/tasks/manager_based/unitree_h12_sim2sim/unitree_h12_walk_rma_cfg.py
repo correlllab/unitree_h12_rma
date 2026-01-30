@@ -79,6 +79,19 @@ class CurriculumRmaCfg:
 
     terrain_levels = CurrTerm(func=mdp.terrain_levels_vel)
     lin_vel_cmd_levels = CurrTerm(mdp.lin_vel_cmd_levels)
+    friction_levels = CurrTerm(
+        func=mdp.rma_friction_levels,
+        params={
+            "friction_range": (0.5, 1.0),
+            "num_buckets": 8,
+            "reward_term_name": "track_lin_vel_xy",
+            "min_progress": 0.2,
+            "max_progress": 0.8,
+            "advance_every_episodes": 10,
+            "advance_every_steps": 500,
+            "cycle": True,
+        },
+    )
 
 
 @configclass
